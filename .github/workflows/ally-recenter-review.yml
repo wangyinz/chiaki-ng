@@ -1,0 +1,36 @@
+name: Verify isolated Ally recenter candidate
+on:
+  push:
+    branches: [fix/ally-recenter-diagnostics]
+permissions:
+  contents: write
+concurrency:
+  group: ally-recenter-review
+  cancel-in-progress: true
+jobs:
+  assemble:
+    if: github.repository == 'wangyinz/chiaki-ng'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Apply verified, scoped edits
+        run: python3 scripts/prepare-ally-recenter-review.py
+      - name: Test production motion and retained input behavior
+        run: |
+          python3 tests/ally/test_motion_reset.py
+          CHIAKI_TEST_SANITIZE=1 python3 tests/ally/test_motion_reset.py
+          python3 tests/ally/test_feedback_history.py
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -Igui/include tests/ally/touchscreenrouter_test.cpp -o /tmp/touch-test
+          /tmp/touch-test
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -Igui/include tests/ally/allyrumble_test.cpp -o /tmp/rumble-test
+          /tmp/rumble-test
+      - name: Commit candidate without temporary assembly workflow
+        run: |
+          git rm scripts/prepare-ally-recenter-review.py .github/workflows/ally-recenter-review.yml
+          git add lib/src/orientation.c lib/include/chiaki/orientation.h gui/src/controllermanager.cpp gui/src/streamsession.cpp CMakeLists.txt .github/workflows/build-pr.yaml
+          git diff --cached --check
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Recenter running Ally motion without cold-start gain; add source-specific rumble diagnostics'
+          git push origin HEAD:fix/ally-recenter-diagnostics
