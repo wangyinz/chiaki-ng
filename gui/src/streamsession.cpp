@@ -2217,6 +2217,16 @@ void StreamSession::SetMicAuthorization(Authorization authorization)
 
 void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 {
+	// Diagnostic capture is strictly opt-in. Record the raw haptics payload
+	// before size validation, envelope extraction, filtering, or motor mixing.
+	const auto capture_result = haptics_capture.Record(buf, buf_size);
+	if(capture_result == ChiakiHapticsAudit::CaptureResult::Started)
+		CHIAKI_LOGI(log.GetChiakiLog(), "Haptic raw capture started (bounded, pre-envelope)");
+	else if(capture_result == ChiakiHapticsAudit::CaptureResult::Limit)
+		CHIAKI_LOGI(log.GetChiakiLog(), "Haptic raw capture limit reached");
+	else if(capture_result == ChiakiHapticsAudit::CaptureResult::Error)
+		CHIAKI_LOGW(log.GetChiakiLog(), "Haptic raw capture unavailable; output file must be new and parent directory must exist");
+
 	if(buf_size == 0)
 	{
 		CHIAKI_LOGW(log.GetChiakiLog(), "Received empty haptics frame");

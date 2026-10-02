@@ -95,6 +95,20 @@ CHIAKI_EXPORT void chiaki_audio_receiver_av_packet(ChiakiAudioReceiver *audio_re
 	uint8_t fec_units_count = chiaki_takion_av_packet_audio_fec_units_count(packet);
 	uint8_t unit_size = chiaki_takion_av_packet_audio_unit_size(packet);
 
+	// When raw haptics capture is explicitly enabled, expose only structural
+	// haptics metadata here. Payload bytes are captured later at the GUI sink,
+	// before envelope/mixing, and are never written to the ordinary session log.
+	const char *haptics_capture_path = packet->is_haptics ? getenv("CHIAKI_HAPTICS_CAPTURE") : NULL;
+	const bool haptics_capture_enabled = haptics_capture_path && *haptics_capture_path;
+	if(haptics_capture_enabled)
+		CHIAKI_LOGV(audio_receiver->log,
+			"Haptic packet packet=%u frame=%u codec=%u source=%u fec=%u total=%u unit_bytes=%u payload_bytes=%zu",
+			(unsigned)packet->packet_index, (unsigned)packet->frame_index,
+			(unsigned)packet->codec, (unsigned)source_units_count,
+			(unsigned)fec_units_count, (unsigned)packet->units_in_frame_total,
+			(unsigned)unit_size, packet->data_size);
+
+
 	if(!packet->data_size)
 	{
 		CHIAKI_LOGE(audio_receiver->log, "Audio AV Packet is empty");
@@ -157,6 +171,8 @@ static void chiaki_audio_receiver_frame(ChiakiAudioReceiver *audio_receiver, Chi
 
 		if(is_haptics)
 		{
+			const char *haptics_capture_path = getenv("CHIAKI_HAPTICS_CAPTURE");
+			const bool haptics_capture_enabled = haptics_capture_path && *haptics_capture_path;
 			if(chiaki_seq_num_16_gt(frame_index, audio_receiver->frame_index_prev))
 			{
 				audio_receiver->frame_index_prev = frame_index;
@@ -164,6 +180,16 @@ static void chiaki_audio_receiver_frame(ChiakiAudioReceiver *audio_receiver, Chi
 				frame_cb_user = audio_receiver->session->haptics_sink.user;
 				deliver_buf = buf;
 				deliver_buf_size = buf_size;
+				if(haptics_capture_enabled)
+					CHIAKI_LOGV(audio_receiver->log,
+						"Haptic frame deliver frame=%u bytes=%zu",
+						(unsigned)frame_index, buf_size);
+			}
+			else if(haptics_capture_enabled)
+			{
+				CHIAKI_LOGV(audio_receiver->log,
+					"Haptic frame drop-stale frame=%u previous=%u bytes=%zu",
+					(unsigned)frame_index, (unsigned)audio_receiver->frame_index_prev, buf_size);
 			}
 			err = chiaki_mutex_unlock(&audio_receiver->mutex);
 			if(err != CHIAKI_ERR_SUCCESS)
