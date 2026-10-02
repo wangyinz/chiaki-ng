@@ -12,11 +12,13 @@
 #include "../../lib/src/utils.h"
 
 #include <QKeyEvent>
+#include <QSet>
 #include <QMutexLocker>
 #include <QtMath>
 #include <atomic>
 
 #include <algorithm>
+#include <cmath>
 
 #include <cstring>
 
@@ -514,7 +516,27 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 	chiaki_controller_state_set_idle(&keyboard_state);
 	chiaki_controller_state_set_idle(&touch_state);
-	touch_tracker=QMap<int, uint8_t>();
+	ChiakiTouch::Config touch_config;
+	for(int corner = 0; corner < 4; ++corner)
+		touch_config.corners[corner] = connect_info.settings->GetTouchscreenCorner(corner);
+	touch_config.cornerPercent = connect_info.settings->GetTouchscreenCornerSize();
+	touch_config.edgeClick = connect_info.settings->GetTouchscreenEdgeClick();
+	touch_config.threeFingerPs = connect_info.settings->GetTouchscreenThreeFingerPs();
+	touch_config.doubleTapMs = connect_info.settings->GetTouchscreenDoubleTapMs();
+	touchscreen = ChiakiTouch::Router(touch_config);
+	ally_trigger_rumble_enabled = connect_info.settings->GetAllyTriggerRumbleEnabled();
+	touchscreen_timer = new QTimer(this);
+	touchscreen_timer->setTimerType(Qt::PreciseTimer);
+	touchscreen_timer->setInterval(10);
+	connect(touchscreen_timer, &QTimer::timeout, this, [this] {
+		const uint64_t now = chiaki_time_now_monotonic_ms();
+		ApplyTouchscreenStates(touchscreen.tick(now));
+		if(!touchscreen.hasPulse(now)) touchscreen_timer->stop();
+	});
+	CHIAKI_LOGI(log.GetChiakiLog(),
+		"Touchscreen config: corners=%d,%d,%d,%d size=%d%% edge=%d three_finger_ps=%d double_tap_gap=%dms",
+		touch_config.corners[0], touch_config.corners[1], touch_config.corners[2], touch_config.corners[3],
+		touch_config.cornerPercent, touch_config.edgeClick, touch_config.threeFingerPs, touch_config.doubleTapMs);
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -590,6 +612,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_session_set_event_cb(&session, EventCb, this);
 
 #if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	ControllerManager::GetInstance()->SetForceRogAllyInputProfile(
+		connect_info.settings->GetForceRogAllyInputProfile());
 	connect(ControllerManager::GetInstance(), &ControllerManager::AvailableControllersUpdated, this, &StreamSession::UpdateGamepads);
 	connect(this, &StreamSession::DualSenseIntensityChanged, ControllerManager::GetInstance(), &ControllerManager::SetDualSenseIntensity);
 	if(connect_info.buttons_by_pos)
@@ -663,8 +687,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 		}
 #endif
 		rumble_haptics_intensity = connect_info.rumble_haptics_intensity;
-		ConnectRumbleHaptics();
 	}
+	// The Ally mixer also owns classic rumble when DualSense audio is disabled.
+	ConnectRumbleHaptics();
 	UpdateGamepads();
 	QTimer *packet_loss_timer = new QTimer(this);
 	packet_loss_timer->setInterval(200);
@@ -698,6 +723,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 StreamSession::~StreamSession()
 {
+	StopAllyRumble();
+	if(touchscreen_timer) touchscreen_timer->stop();
 	mic_active.storeRelaxed(false);
 	StopAudioOutDrainThread();
 	if(audio_out)
@@ -800,6 +827,8 @@ StreamSession::~StreamSession()
 
 void StreamSession::Start()
 {
+	ally_rumble_running = true;
+	if(rumble_haptics_timer) rumble_haptics_timer->start();
 	if(!connect_timer.isValid())
 		connect_timer.start();
 	ChiakiErrorCode err = chiaki_session_start(&session);
@@ -812,6 +841,8 @@ void StreamSession::Start()
 
 void StreamSession::Stop()
 {
+	StopAllyRumble();
+	ResetTouchscreen();
 	mic_active.storeRelaxed(false);
 	chiaki_session_stop(&session);
 }
@@ -907,13 +938,14 @@ void StreamSession::HandleMouseReleaseEvent(QMouseEvent *event)
 
 void StreamSession::HandleMouseMoveEvent(QMouseEvent *event, qreal width, qreal height)
 {
+	if(width <= 0 || height <= 0) return;
 	if(!mouse_touch_enabled)
 		return;
 	// left button with move => touchpad gesture, otherwise ignore
 	if (event->buttons() == Qt::LeftButton)
 	{
-		float x = std::clamp(0.0, event->scenePosition().x(), width);
-		float y = std::clamp(0.0, event->scenePosition().y(), height);
+		float x = std::clamp(event->scenePosition().x(), qreal(0), width);
+		float y = std::clamp(event->scenePosition().y(), qreal(0), height);
 		float psx = x * (PS_TOUCHPAD_MAX_X / width);
 		float psy = y * (PS_TOUCHPAD_MAX_Y / height);
 		// if touch id is set, move, otherwise start
@@ -981,69 +1013,57 @@ void StreamSession::HandleKeyboardEvent(QKeyEvent *event)
 	SendFeedbackState();
 }
 
+void StreamSession::ApplyTouchscreenStates(const std::vector<ChiakiTouch::Snapshot> &states)
+{
+	static_assert(ChiakiTouch::TouchpadButton == CHIAKI_CONTROLLER_BUTTON_TOUCHPAD, "Touchpad bit mismatch");
+	static_assert(ChiakiTouch::PsButton == CHIAKI_CONTROLLER_BUTTON_PS, "PS bit mismatch");
+	for(const auto &snapshot : states)
+	{
+		const bool transition = touch_state.buttons != snapshot.buttons ||
+			touch_state.touches[0].id != snapshot.touches[0].id ||
+			touch_state.touches[1].id != snapshot.touches[1].id;
+		touch_state.buttons = snapshot.buttons;
+		for(size_t i = 0; i < CHIAKI_CONTROLLER_TOUCHES_MAX; ++i)
+		{
+			touch_state.touches[i].id = static_cast<int8_t>(snapshot.touches[i].id);
+			touch_state.touches[i].x = static_cast<uint16_t>(std::lround(snapshot.touches[i].x * (PS_TOUCHPAD_MAX_X - 1)));
+			touch_state.touches[i].y = static_cast<uint16_t>(std::lround(snapshot.touches[i].y * (PS_TOUCHPAD_MAX_Y - 1)));
+		}
+		if(transition)
+			CHIAKI_LOGV(log.GetChiakiLog(), "Touchscreen routed buttons=%08x slots=%d,%d",
+				touch_state.buttons, touch_state.touches[0].id, touch_state.touches[1].id);
+		SendFeedbackState();
+	}
+}
+
+void StreamSession::ResetTouchscreen()
+{
+	if(touchscreen_timer) touchscreen_timer->stop();
+	ApplyTouchscreenStates(touchscreen.reset(chiaki_time_now_monotonic_ms()));
+}
+
 void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal height)
 {
-	//unset touchpad (we will set it if user touches edge of screen)
-	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-
-	const QList<QTouchEvent::TouchPoint> touchPoints = event->points();
-
-	for (const QTouchEvent::TouchPoint &touchPoint : touchPoints)
+	if(input_block) { ResetTouchscreen(); return; }
+	ChiakiTouch::Phase phase = ChiakiTouch::Phase::Update;
+	if(event->type() == QEvent::TouchBegin) phase = ChiakiTouch::Phase::Begin;
+	else if(event->type() == QEvent::TouchEnd) phase = ChiakiTouch::Phase::End;
+	else if(event->type() == QEvent::TouchCancel) phase = ChiakiTouch::Phase::Cancel;
+	std::vector<ChiakiTouch::Point> points;
+	points.reserve(event->points().size());
+	for(const auto &point : event->points())
 	{
-		int id = touchPoint.id();
-		switch (touchPoint.state())
-		{
-			//skip unchanged touchpoints
-			case QEventPoint::State::Stationary:
-				continue;
-			case QEventPoint::State::Pressed:
-			case QEventPoint::State::Updated:
-			{
-				float norm_x = std::clamp(0.0, touchPoint.scenePosition().x() / width, 1.0);
-				float norm_y = std::clamp(0.0, touchPoint.scenePosition().y() / height, 1.0);
-
-				// Touching edges of screen is a touchpad click
-				if(norm_x <= 0.05 || norm_x >= 0.95 || norm_y <= 0.05 || norm_y >= 0.95)
-					touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-				else if(touch_tracker.empty()) // Double tap is a touchpad click
-				{
-					if(double_tap_timer.isValid() && double_tap_timer.elapsed() < 500)
-						touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-					double_tap_timer.restart();
-				}
-				// Scale to PS TouchPad since that's what PS Console expects
-				float psx = norm_x * PS_TOUCHPAD_MAX_X;
-				float psy = norm_y * PS_TOUCHPAD_MAX_Y;
-				auto it = touch_tracker.find(id);
-				if(it == touch_tracker.end())
-				{
-					int8_t cid = chiaki_controller_state_start_touch(&touch_state, (uint16_t)psx, (uint16_t)psy);
-					// if cid < 0 => already too many multi-touches
-					if(cid >= 0)
-						touch_tracker[id] = (uint8_t)cid;
-					else
-						break;
-				}
-				else
-					chiaki_controller_state_set_touch_pos(&touch_state, it.value(), (uint16_t)psx, (uint16_t)psy);
-				break;
-			}
-			case QEventPoint::State::Released:
-			{
-				for(auto it=touch_tracker.begin(); it!=touch_tracker.end(); it++)
-				{
-					if(it.key() == id)
-					{
-						chiaki_controller_state_stop_touch(&touch_state, it.value());
-						touch_tracker.erase(it);
-						break;
-					}
-				}
-				break;
-			}
-		}
+		ChiakiTouch::PointState state = ChiakiTouch::PointState::Stationary;
+		if(point.state() == QEventPoint::State::Pressed) state = ChiakiTouch::PointState::Pressed;
+		else if(point.state() == QEventPoint::State::Released) state = ChiakiTouch::PointState::Released;
+		else if(point.state() == QEventPoint::State::Updated) state = ChiakiTouch::PointState::Moved;
+		points.push_back({point.id(), point.scenePosition().x(), point.scenePosition().y(), state});
 	}
-	SendFeedbackState();
+	const uint64_t now = chiaki_time_now_monotonic_ms();
+	ApplyTouchscreenStates(touchscreen.update(phase, points, width, height, now));
+	if(touchscreen.hasPulse(now)) touchscreen_timer->start();
+	else touchscreen_timer->stop();
+	event->accept();
 }
 
 void StreamSession::HandleDpadTouchEvent(ChiakiControllerState *state, bool placeholder)
@@ -1170,7 +1190,12 @@ void StreamSession::UpdateGamepads()
 				CHIAKI_LOGE(log.GetChiakiLog(), "Failed to open controller %d", controller_id);
 				continue;
 			}
-			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d opened: \"%s\"", controller_id, controller->GetName().toLocal8Bit().constData());
+			const QByteArray controller_name = controller->GetName().toLocal8Bit();
+			const QByteArray controller_vidpid = controller->GetVIDPIDString().toLocal8Bit();
+			CHIAKI_LOGI(log.GetChiakiLog(),
+				"Controller %d opened: \"%s\" vid:pid=%s handheld=%d rog_ally_profile=%d",
+				controller_id, controller_name.constData(), controller_vidpid.constData(),
+				controller->IsHandheld(), controller->IsRogAlly());
 			connect(controller, &Controller::StateChanged, this, &StreamSession::SendFeedbackState);
 			connect(controller, &Controller::MicButtonPush, this, &StreamSession::ToggleMute);
 			controllers[controller_id] = controller;
@@ -1758,49 +1783,88 @@ void StreamSession::DisconnectHaptics()
 	}
 }
 
+void StreamSession::UpdateAllyRumble()
+{
+	if(!ally_rumble_running) return;
+	const uint64_t now = chiaki_time_now_monotonic_ms();
+	for(auto controller : controllers)
+	{
+		if(!controller->IsRogAlly()) continue;
+		ChiakiAllyRumble::Sources sources;
+		if(connected && haptics_handheld > 0)
+		{
+			const auto input = controller->GetState();
+			sources = ally_rumble.sample(input.l2_state, input.r2_state, now,
+				rumble_haptics_intensity != RumbleHapticsIntensity::Off,
+				ally_trigger_rumble_enabled);
+		}
+		// One writer for this device: a zero from classic/audio cannot erase
+		// another source. SDL arguments are LOW/HIGH frequency, never L2/R2.
+		controller->SetHapticRumble(sources.output.low, sources.output.high);
+		if(now - ally_rumble_log_ms >= 250 && (sources.output.low || sources.output.high))
+		{
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Ally rumble classic low/high=%u/%u body=%u/%u trigger L2/R2=%u/%u -> motor low/high=%u/%u",
+				sources.classic.low, sources.classic.high, sources.body.low, sources.body.high,
+				sources.l2, sources.r2, sources.output.low, sources.output.high);
+			ally_rumble_log_ms = now;
+		}
+	}
+}
+
+void StreamSession::StopAllyRumble()
+{
+	ally_rumble_running = false;
+	if(rumble_haptics_timer) rumble_haptics_timer->stop();
+	ally_rumble.reset();
+	for(auto controller : controllers)
+		if(controller->IsRogAlly()) controller->SetHapticRumble(0, 0);
+}
+
 void StreamSession::ConnectRumbleHaptics()
 {
-	if(rumble_haptics_connected)
-		return;
+	if(rumble_haptics_connected) return;
 	rumble_haptics = {};
 	rumble_haptics.reserve(20);
 	connect(this, &StreamSession::RumbleHapticPushed, this, &StreamSession::QueueRumbleHaptics);
-	auto rumble_haptics_interval = RUMBLE_HAPTICS_PACKETS_PER_RUMBLE * 10;
-	auto rumble_haptics_timer = new QTimer(this);
-	connect(rumble_haptics_timer, &QTimer::timeout, this, [this]{
-		bool changed = false;
-		uint32_t strength = 0;
-		for(size_t i = 0; i < RUMBLE_HAPTICS_PACKETS_PER_RUMBLE; i++)
+	rumble_haptics_timer = new QTimer(this);
+	rumble_haptics_timer->setInterval(RUMBLE_HAPTICS_PACKETS_PER_RUMBLE * 10);
+	connect(rumble_haptics_timer, &QTimer::timeout, this, [this] {
+		uint32_t left_sum = 0, right_sum = 0;
+		for(size_t i = 0; i < RUMBLE_HAPTICS_PACKETS_PER_RUMBLE; ++i)
 		{
-			if(!rumble_haptics.isEmpty())
-				strength += rumble_haptics.dequeue();
+			if(rumble_haptics.isEmpty()) break;
+			const auto frame = rumble_haptics.dequeue();
+			left_sum += frame.first; right_sum += frame.second;
 		}
-		strength /= RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
-		QMetaObject::invokeMethod(this, [this, strength]() {
-			for(auto controller : controllers)
-			{
+		const uint16_t left = left_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		const uint16_t right = right_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		ally_rumble.setBody({left, right}, chiaki_time_now_monotonic_ms());
+		UpdateAllyRumble();
+		// Preserve the existing non-Ally / external DualSense path.
+		for(auto controller : controllers)
+		{
+			if(controller->IsRogAlly()) continue;
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
-				if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
+			if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
 #else
-				if(haptics_handheld < 1 && controller->IsHandheld())
+			if(haptics_handheld < 1 && controller->IsHandheld())
 #endif
-					continue;
-
-				if(strength > 0 || rumble_haptics_on)
-					controller->SetHapticRumble(strength, strength);
-			}
-		});
-		rumble_haptics_on = strength > 0 ? true : false;
+				continue;
+			if(left || right || rumble_haptics_on) controller->SetHapticRumble(left, right);
+		}
+		rumble_haptics_on = left || right;
 	});
-	rumble_haptics_timer->start(rumble_haptics_interval);
+	rumble_haptics_timer->start();
 	rumble_haptics_connected = true;
 }
 
-void StreamSession::QueueRumbleHaptics(uint16_t strength)
+void StreamSession::QueueRumbleHaptics(uint16_t left, uint16_t right)
 {
 	if(!rumble_haptics_connected)
 		return;
-	rumble_haptics.enqueue(strength);
+	while(rumble_haptics.size() >= 12) rumble_haptics.dequeue();
+	rumble_haptics.enqueue(qMakePair(left, right));
 }
 
 void StreamSession::ConnectHaptics()
@@ -2212,15 +2276,14 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 			suml += static_cast<uint32_t>(qFabs(amplitudel)) * 2;
 			sumr += static_cast<uint32_t>(qFabs(amplituder)) * 2;
 		}
-		uint32_t temp_left = (suml / buf_count);
-		uint32_t temp_right = (sumr / buf_count);
-		uint16_t original_strength = (temp_left > temp_right) ? temp_left : temp_right;
+		uint32_t temp_left = std::min<uint32_t>(suml / buf_count, UINT16_MAX);
+		uint32_t temp_right = std::min<uint32_t>(sumr / buf_count, UINT16_MAX);
+		const uint32_t raw_left = temp_left;
+		const uint32_t raw_right = temp_right;
 		uint16_t left = 0;
 		uint16_t right = 0;
 		temp_left = (temp_left > HAPTIC_RUMBLE_MIN_STRENGTH) ? temp_left : 0;
 		temp_right = (temp_right > HAPTIC_RUMBLE_MIN_STRENGTH) ? temp_right : 0;
-		if(temp_left == 0 && temp_right == 0)
-			return;
 		switch(rumble_haptics_intensity)
 		{
 			case RumbleHapticsIntensity::VeryWeak:
@@ -2255,20 +2318,31 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		// Set minimum rumble value if above rumble min for controllers that shift up to 9 bits when rumbling
 		left = ((left > 0 && left < (1 << 9)) ? (1 << 9) : left);
 		right = ((right > 0 && right < (1 << 9)) ? (1 << 9) : right);
-		uint16_t strength = (left > right) ? left : right;
-		bool send_rumble_haptics = false;
-		for(auto controller : controllers)
+
+		const uint64_t now_ms = chiaki_time_now_monotonic_ms();
+		const bool activity_changed =
+			((left == 0) != (last_haptics_debug_left == 0)) ||
+			((right == 0) != (last_haptics_debug_right == 0));
+		if(activity_changed)
 		{
-#if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
-			if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
-#else
-			if(haptics_handheld < 1 && controller->IsHandheld())
-#endif
-				continue;
-			send_rumble_haptics = true;
+			CHIAKI_LOGI(log.GetChiakiLog(),
+				"Rumble-haptics activity raw L=%u R=%u -> rumble L=%u R=%u",
+				raw_left, raw_right, left, right);
 		}
-		if(send_rumble_haptics)
-			emit RumbleHapticPushed(strength);
+		else if(now_ms - last_haptics_debug_ms >= 250)
+		{
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Rumble-haptics frame raw L=%u R=%u -> rumble L=%u R=%u",
+				raw_left, raw_right, left, right);
+		}
+		if(activity_changed || now_ms - last_haptics_debug_ms >= 250)
+		{
+			last_haptics_debug_ms = now_ms;
+			last_haptics_debug_left = left;
+			last_haptics_debug_right = right;
+		}
+
+		emit RumbleHapticPushed(left, right);
 		return;
 	}
 	if(haptics_output == 0)
@@ -2334,6 +2408,7 @@ void StreamSession::Event(ChiakiEvent *event)
 			emit ConnectedChanged();
 			break;
 		case CHIAKI_EVENT_QUIT:
+			QMetaObject::invokeMethod(this, &StreamSession::StopAllyRumble, Qt::QueuedConnection);
 			if(!connected && !holepunch_session && chiaki_quit_reason_is_error(event->quit.reason) && connect_timer.elapsed() < SESSION_RETRY_SECONDS * 1000)
 			{
 				QTimer::singleShot(SESSION_RETRY_SECONDS / 3, this, &StreamSession::Start);
@@ -2360,11 +2435,16 @@ void StreamSession::Event(ChiakiEvent *event)
 				return;
 			uint8_t left = event->rumble.left;
 			uint8_t right = event->rumble.right;
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Classic rumble event low-frequency=%u high-frequency=%u", left, right);
 			uint8_t left_adj = left * rumble_multiplier;
 			uint8_t right_adj = right * rumble_multiplier;
 			QMetaObject::invokeMethod(this, [this, left, right, left_adj, right_adj]() {
+				ally_rumble.setClassic(left, right, chiaki_time_now_monotonic_ms());
+				UpdateAllyRumble();
 				for(auto controller : controllers)
 				{
+					if(controller->IsRogAlly()) continue;
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 					if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
 #else
@@ -2460,6 +2540,11 @@ void StreamSession::Event(ChiakiEvent *event)
 					break;
 				}
 			}
+
+			const double ally_body_gain = rumble_multiplier;
+			QMetaObject::invokeMethod(this, [this, ally_body_gain]() {
+				ally_rumble.setBodyGain(ally_body_gain); UpdateAllyRumble();
+			});
 			uint8_t trigger_intensity = (ps5_trigger_intensity < 0) ? 0xF0 : ps5_trigger_intensity;
 			uint8_t rumble_intensity = (ps5_rumble_intensity < 0) ? 0x0F : ps5_rumble_intensity;
 			emit DualSenseIntensityChanged(trigger_intensity | rumble_intensity);
@@ -2485,24 +2570,45 @@ void StreamSession::Event(ChiakiEvent *event)
 					break;
 				}
 			}
+
+			const double ally_trigger_gain = ps5_trigger_intensity < 0 ? 0.0 :
+				(ps5_trigger_intensity == 0x90 ? 0.33 : ps5_trigger_intensity == 0x60 ? 0.5 : 1.0);
+			QMetaObject::invokeMethod(this, [this, ally_trigger_gain]() {
+				ally_rumble.setTriggerGain(ally_trigger_gain); UpdateAllyRumble();
+			});
 			uint8_t trigger_intensity = (ps5_trigger_intensity < 0) ? 0xF0 : ps5_trigger_intensity;
 			uint8_t rumble_intensity = (ps5_rumble_intensity < 0) ? 0x0F : ps5_rumble_intensity;
 			emit DualSenseIntensityChanged(trigger_intensity | rumble_intensity);
 			break;
 		}
 		case CHIAKI_EVENT_TRIGGER_EFFECTS: {
-			if(ps5_trigger_intensity < 0)
-				return;
 			uint8_t type_left = event->trigger_effects.type_left;
 			uint8_t data_left[10];
 			memcpy(data_left, event->trigger_effects.left, 10);
 			uint8_t data_right[10];
 			memcpy(data_right, event->trigger_effects.right, 10);
 			uint8_t type_right = event->trigger_effects.type_right;
-			QMetaObject::invokeMethod(this, [this, type_left, data_left, type_right, data_right]() {
-				for(auto controller : controllers)
-					controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
-			});
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Trigger effects L[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x] "
+				"R[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]",
+				type_left,
+				data_left[0], data_left[1], data_left[2], data_left[3], data_left[4],
+				data_left[5], data_left[6], data_left[7], data_left[8], data_left[9],
+				type_right,
+				data_right[0], data_right[1], data_right[2], data_right[3], data_right[4],
+				data_right[5], data_right[6], data_right[7], data_right[8], data_right[9]);
+			ChiakiAllyRumble::TriggerEffect left_effect, right_effect;
+			left_effect.type = type_left; right_effect.type = type_right;
+			std::copy_n(data_left, 10, left_effect.data.begin());
+			std::copy_n(data_right, 10, right_effect.data.begin());
+			QMetaObject::invokeMethod(this,
+				[this, type_left, data_left, type_right, data_right, left_effect, right_effect]() {
+					ally_rumble.setTriggers(left_effect, right_effect);
+					UpdateAllyRumble();
+					// Native DualSense retains its unmodified trigger-effect path.
+					for(auto controller : controllers)
+						controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
+				});
 			break;
 		}
 		default:

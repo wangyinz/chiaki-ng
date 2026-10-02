@@ -13,7 +13,7 @@
 
 static void *feedback_sender_thread_func(void *user);
 static void feedback_sender_send_state(ChiakiFeedbackSender *feedback_sender, const ChiakiControllerState *state);
-static void feedback_sender_send_history_packet(ChiakiFeedbackSender *feedback_sender, const uint8_t *buf, size_t buf_size);
+static void feedback_sender_send_history_packet(ChiakiFeedbackSender *feedback_sender, ChiakiSeqNum16 sequence, const uint8_t *buf, size_t buf_size);
 static void feedback_sender_flush_history_locked(ChiakiFeedbackSender *feedback_sender);
 static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender, const ChiakiControllerState *state_prev, const ChiakiControllerState *state_now);
 
@@ -144,11 +144,17 @@ static void feedback_sender_send_state(ChiakiFeedbackSender *feedback_sender, co
 		CHIAKI_LOGE(feedback_sender->log, "FeedbackSender failed to send Feedback State");
 }
 
-static void feedback_sender_send_history_packet(ChiakiFeedbackSender *feedback_sender, const uint8_t *buf, size_t buf_size)
+static void feedback_sender_send_history_packet(ChiakiFeedbackSender *feedback_sender, ChiakiSeqNum16 sequence, const uint8_t *buf, size_t buf_size)
 {
-	//CHIAKI_LOGD(feedback_sender->log, "Feedback History:");
-	//chiaki_log_hexdump(feedback_sender->log, CHIAKI_LOG_DEBUG, buf, buf_size);
-	chiaki_takion_send_feedback_history(feedback_sender->takion, feedback_sender->history_seq_num++, (uint8_t *)buf, buf_size);
+	ChiakiErrorCode err = chiaki_takion_send_feedback_history(feedback_sender->takion, sequence, (uint8_t *)buf, buf_size);
+	// Input-only metadata: do not dump protocol authentication or session data.
+	CHIAKI_LOGV(feedback_sender->log,
+		"Feedback history send seq=%u bytes=%zu newest=0x%02x id_or_code=%u result=%d",
+		(unsigned)sequence, buf_size, buf_size ? (unsigned)buf[0] : 0,
+		buf_size > 1 ? (unsigned)buf[1] : 0, (int)err);
+	if(err != CHIAKI_ERR_SUCCESS)
+		CHIAKI_LOGE(feedback_sender->log, "Feedback history send failed seq=%u: %s",
+			(unsigned)sequence, chiaki_error_string(err));
 }
 
 static void feedback_sender_flush_history_locked(ChiakiFeedbackSender *feedback_sender)
@@ -156,39 +162,49 @@ static void feedback_sender_flush_history_locked(ChiakiFeedbackSender *feedback_
 	if(!feedback_sender->history_dirty)
 		return;
 
-	size_t packet_index = (feedback_sender->history_packet_begin + feedback_sender->history_packet_len)
-		% CHIAKI_FEEDBACK_HISTORY_PACKET_QUEUE_SIZE;
-	size_t packet_size = CHIAKI_FEEDBACK_HISTORY_PACKET_BUF_SIZE;
+	// Assign the sequence to the event's immutable history snapshot, not when
+	// it is eventually dequeued. Dropping an old queued snapshot must leave a
+	// sequence gap; renumbering would disguise it as an ordinary next event.
+	const ChiakiSeqNum16 sequence = feedback_sender->history_seq_num++;
+	uint8_t packet[CHIAKI_FEEDBACK_HISTORY_PACKET_BUF_SIZE];
+	size_t packet_size = sizeof(packet);
 	ChiakiErrorCode err = chiaki_feedback_history_buffer_format(
-			&feedback_sender->history_buf,
-			feedback_sender->history_packets[packet_index],
-			&packet_size);
+			&feedback_sender->history_buf, packet, &packet_size);
+	feedback_sender->history_dirty = false;
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
-		CHIAKI_LOGE(feedback_sender->log, "Feedback Sender failed to format history buffer");
+		CHIAKI_LOGE(feedback_sender->log, "Feedback Sender failed to format history seq=%u",
+			(unsigned)sequence);
 		return;
 	}
 
+	const size_t packet_index = (feedback_sender->history_packet_begin + feedback_sender->history_packet_len)
+		% CHIAKI_FEEDBACK_HISTORY_PACKET_QUEUE_SIZE;
+	memcpy(feedback_sender->history_packets[packet_index], packet, packet_size);
+	feedback_sender->history_packet_sizes[packet_index] = packet_size;
+	feedback_sender->history_packet_sequences[packet_index] = sequence;
 	if(feedback_sender->history_packet_len < CHIAKI_FEEDBACK_HISTORY_PACKET_QUEUE_SIZE)
-	{
-		feedback_sender->history_packet_sizes[packet_index] = packet_size;
 		feedback_sender->history_packet_len++;
-	}
 	else
 	{
-		feedback_sender->history_packet_sizes[feedback_sender->history_packet_begin] = packet_size;
-		memcpy(
-			feedback_sender->history_packets[feedback_sender->history_packet_begin],
-			feedback_sender->history_packets[packet_index],
-			packet_size);
 		feedback_sender->history_packet_begin = (feedback_sender->history_packet_begin + 1)
 			% CHIAKI_FEEDBACK_HISTORY_PACKET_QUEUE_SIZE;
-		CHIAKI_LOGW(feedback_sender->log, "Feedback Sender history packet queue overflow");
+		CHIAKI_LOGW(feedback_sender->log, "Feedback Sender history packet queue overflow at seq=%u",
+			(unsigned)sequence);
 	}
 
 	if(feedback_sender->history_buf.len > FEEDBACK_HISTORY_RESEND_EVENT_COUNT)
 		feedback_sender->history_buf.len = FEEDBACK_HISTORY_RESEND_EVENT_COUNT;
-	feedback_sender->history_dirty = false;
+}
+
+static void feedback_sender_queue_history_event_locked(ChiakiFeedbackSender *feedback_sender, ChiakiFeedbackHistoryEvent *event)
+{
+	chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, event);
+	feedback_sender->history_dirty = true;
+	// Restore the pre-batching sender's one-new-event-per-history-packet rule.
+	// Two simultaneous UPs (or a touch plus a button) need separate snapshots,
+	// each headed by its own new event and retaining the older resend tail.
+	feedback_sender_flush_history_locked(feedback_sender);
 }
 
 static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender, const ChiakiControllerState *state_prev, const ChiakiControllerState *state_now)
@@ -198,21 +214,23 @@ static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender
 		if(state_prev->touches[i].id != state_now->touches[i].id && state_prev->touches[i].id >= 0)
 		{
 			ChiakiFeedbackHistoryEvent event;
+			CHIAKI_LOGV(feedback_sender->log, "Touch history UP slot=%zu id=%d", i, state_prev->touches[i].id);
 			chiaki_feedback_history_event_set_touchpad(&event, false, (uint8_t)state_prev->touches[i].id,
 					state_prev->touches[i].x, state_prev->touches[i].y);
-			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
-			feedback_sender->history_dirty = true;
+			feedback_sender_queue_history_event_locked(feedback_sender, &event);
 		}
-		else if(state_now->touches[i].id >= 0
+		// A slot replacement requires BOTH old-UP and new-DOWN.
+		if(state_now->touches[i].id >= 0
 				&& (state_prev->touches[i].id != state_now->touches[i].id
 					|| state_prev->touches[i].x != state_now->touches[i].x
 					|| state_prev->touches[i].y != state_now->touches[i].y))
 		{
 			ChiakiFeedbackHistoryEvent event;
+			if(state_prev->touches[i].id != state_now->touches[i].id)
+				CHIAKI_LOGV(feedback_sender->log, "Touch history DOWN slot=%zu id=%d", i, state_now->touches[i].id);
 			chiaki_feedback_history_event_set_touchpad(&event, true, (uint8_t)state_now->touches[i].id,
 					state_now->touches[i].x, state_now->touches[i].y);
-			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
-			feedback_sender->history_dirty = true;
+			feedback_sender_queue_history_event_locked(feedback_sender, &event);
 		}
 	}
 
@@ -232,8 +250,7 @@ static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender
 				CHIAKI_LOGE(feedback_sender->log, "Feedback Sender failed to format button history event for button id %llu", (unsigned long long)button_id);
 				continue;
 			}
-			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
-			feedback_sender->history_dirty = true;
+			feedback_sender_queue_history_event_locked(feedback_sender, &event);
 		}
 	}
 
@@ -243,8 +260,7 @@ static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender
 		ChiakiErrorCode err = chiaki_feedback_history_event_set_button(&event, CHIAKI_CONTROLLER_ANALOG_BUTTON_L2, state_now->l2_state);
 		if(err == CHIAKI_ERR_SUCCESS)
 		{
-			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
-			feedback_sender->history_dirty = true;
+			feedback_sender_queue_history_event_locked(feedback_sender, &event);
 		}
 		else
 			CHIAKI_LOGE(feedback_sender->log, "Feedback Sender failed to format button history event for L2");
@@ -256,8 +272,7 @@ static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender
 		ChiakiErrorCode err = chiaki_feedback_history_event_set_button(&event, CHIAKI_CONTROLLER_ANALOG_BUTTON_R2, state_now->r2_state);
 		if(err == CHIAKI_ERR_SUCCESS)
 		{
-			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
-			feedback_sender->history_dirty = true;
+			feedback_sender_queue_history_event_locked(feedback_sender, &event);
 		}
 		else
 			CHIAKI_LOGE(feedback_sender->log, "Feedback Sender failed to format button history event for R2");
@@ -308,6 +323,7 @@ static void *feedback_sender_thread_func(void *user)
 		bool send_feedback_history = false;
 		uint8_t history_buf[CHIAKI_FEEDBACK_HISTORY_PACKET_BUF_SIZE];
 		size_t history_buf_size = 0;
+		ChiakiSeqNum16 history_sequence = 0;
 
 		if(feedback_sender->controller_state_changed)
 		{
@@ -324,6 +340,7 @@ static void *feedback_sender_thread_func(void *user)
 		{
 			size_t packet_index = feedback_sender->history_packet_begin;
 			history_buf_size = feedback_sender->history_packet_sizes[packet_index];
+			history_sequence = feedback_sender->history_packet_sequences[packet_index];
 			memcpy(history_buf, feedback_sender->history_packets[packet_index], history_buf_size);
 			feedback_sender->history_packet_begin = (feedback_sender->history_packet_begin + 1)
 				% CHIAKI_FEEDBACK_HISTORY_PACKET_QUEUE_SIZE;
@@ -336,7 +353,7 @@ static void *feedback_sender_thread_func(void *user)
 			feedback_sender_send_state(feedback_sender, &state_now);
 
 		if(send_feedback_history)
-			feedback_sender_send_history_packet(feedback_sender, history_buf, history_buf_size);
+			feedback_sender_send_history_packet(feedback_sender, history_sequence, history_buf, history_buf_size);
 
 		err = chiaki_mutex_lock(&feedback_sender->state_mutex);
 		if(err != CHIAKI_ERR_SUCCESS)

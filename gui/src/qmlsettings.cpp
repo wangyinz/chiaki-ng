@@ -312,6 +312,17 @@ void QmlSettings::setButtonsByPosition(bool buttonsByPosition)
     emit buttonsByPositionChanged();
 }
 
+bool QmlSettings::forceRogAllyInputProfile() const
+{
+    return settings->GetForceRogAllyInputProfile();
+}
+
+void QmlSettings::setForceRogAllyInputProfile(bool enabled)
+{
+    settings->SetForceRogAllyInputProfile(enabled);
+    emit forceRogAllyInputProfileChanged();
+}
+
 bool QmlSettings::startMicUnmuted() const
 {
     return settings->GetStartMicUnmuted();
@@ -2098,3 +2109,31 @@ void QmlSettings::importPlaceboSettings()
     settings->ImportPlaceboSettings(std::move(fileName));;
     refreshAllPlaceboKeys();
 }
+
+
+QVariantList QmlSettings::touchscreenCorners() const
+{
+    QVariantList values;
+    for(int i = 0; i < 4; ++i) values.append(settings->GetTouchscreenCorner(i));
+    return values;
+}
+void QmlSettings::setTouchscreenCorner(int corner, int action)
+{
+    settings->SetTouchscreenCorner(corner, action);
+    emit touchscreenChanged();
+}
+int QmlSettings::touchscreenCornerSize() const { return settings->GetTouchscreenCornerSize(); }
+void QmlSettings::setTouchscreenCornerSize(int value)
+{ settings->SetTouchscreenCornerSize(value); emit touchscreenChanged(); }
+bool QmlSettings::touchscreenEdgeClick() const { return settings->GetTouchscreenEdgeClick(); }
+void QmlSettings::setTouchscreenEdgeClick(bool value)
+{ settings->SetTouchscreenEdgeClick(value); emit touchscreenChanged(); }
+bool QmlSettings::touchscreenThreeFingerPs() const { return settings->GetTouchscreenThreeFingerPs(); }
+void QmlSettings::setTouchscreenThreeFingerPs(bool value)
+{ settings->SetTouchscreenThreeFingerPs(value); emit touchscreenChanged(); }
+int QmlSettings::touchscreenDoubleTapMs() const { return settings->GetTouchscreenDoubleTapMs(); }
+void QmlSettings::setTouchscreenDoubleTapMs(int value)
+{ settings->SetTouchscreenDoubleTapMs(value); emit touchscreenChanged(); }
+bool QmlSettings::allyTriggerRumbleEnabled() const { return settings->GetAllyTriggerRumbleEnabled(); }
+void QmlSettings::setAllyTriggerRumbleEnabled(bool value)
+{ settings->SetAllyTriggerRumbleEnabled(value); emit touchscreenChanged(); }

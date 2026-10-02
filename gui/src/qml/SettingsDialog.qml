@@ -2747,6 +2747,87 @@ DialogView {
                                 text: qsTr("(L1+R1+dpad Up)")
                             }
                         }
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.preferredWidth: 620
+                            spacing: 10
+                            Label { text: qsTr("Touchscreen / Corner Buttons"); font.bold: true }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: qsTr("Original behavior keeps touch coordinates and edge clicks. A mapped corner captures its finger as a button until release. Changes apply on the next stream.")
+                            }
+                            Repeater {
+                                model: [qsTr("Top left"), qsTr("Top right"), qsTr("Bottom left"), qsTr("Bottom right")]
+                                delegate: RowLayout {
+                                    required property int index
+                                    required property string modelData
+                                    Layout.fillWidth: true
+                                    Label { text: modelData; Layout.preferredWidth: 130 }
+                                    C.ComboBox {
+                                        Layout.fillWidth: true
+                                        model: [qsTr("Original behavior"), qsTr("Cross"), qsTr("Circle"), qsTr("Square"), qsTr("Triangle"), qsTr("Dpad Left"), qsTr("Dpad Right"), qsTr("Dpad Up"), qsTr("Dpad Down"), qsTr("L1"), qsTr("R1"), qsTr("L3"), qsTr("R3"), qsTr("Options"), qsTr("Share"), qsTr("Touchpad Click"), qsTr("PS")]
+                                        currentIndex: Chiaki.settings.touchscreenCorners[parent.index]
+                                        onActivated: value => Chiaki.settings.setTouchscreenCorner(parent.index, value)
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Label { text: qsTr("Corner size:") }
+                                Slider {
+                                    from: 3; to: 20; stepSize: 1
+                                    value: Chiaki.settings.touchscreenCornerSize
+                                    onMoved: Chiaki.settings.touchscreenCornerSize = value
+                                }
+                                Label { text: Chiaki.settings.touchscreenCornerSize + qsTr("% of width and height") }
+                            }
+                            C.CheckBox {
+                                text: qsTr("Original edge touchpad click (5% border)")
+                                checked: Chiaki.settings.touchscreenEdgeClick
+                                onToggled: Chiaki.settings.touchscreenEdgeClick = checked
+                            }
+                            C.CheckBox {
+                                text: qsTr("Three-finger tap for PS (outside mapped corners)")
+                                checked: Chiaki.settings.touchscreenThreeFingerPs
+                                onToggled: Chiaki.settings.touchscreenThreeFingerPs = checked
+                            }
+                            RowLayout {
+                                Label { text: qsTr("Double-tap gap:") }
+                                Slider {
+                                    from: 200; to: 1000; stepSize: 50
+                                    value: Chiaki.settings.touchscreenDoubleTapMs
+                                    onMoved: Chiaki.settings.touchscreenDoubleTapMs = value
+                                }
+                                Label { text: Chiaki.settings.touchscreenDoubleTapMs + qsTr(" ms") }
+                            }
+                            C.CheckBox {
+                                text: qsTr("Experimental Ally trigger-to-rumble approximation")
+                                checked: Chiaki.settings.allyTriggerRumbleEnabled
+                                onToggled: Chiaki.settings.allyTriggerRumbleEnabled = checked
+                            }
+                        }
+                        RowLayout {
+                            spacing: 10
+                            Layout.alignment: Qt.AlignHCenter
+                            Label {
+                                Layout.alignment: Qt.AlignRight
+                                text: qsTr("ROG Ally Input Profile:")
+                            }
+
+                            C.CheckBox {
+                                id: forceRogAllyProfile
+                                text: qsTr("Force Ally motion/input handling")
+                                checked: Chiaki.settings.forceRogAllyInputProfile
+                                onToggled: Chiaki.settings.forceRogAllyInputProfile = checked
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Use this if the built-in Ally controller is exposed by Windows as an Xbox 360 controller. Takes effect on the next stream.")
+                            }
+
+                            Label {
+                                Layout.alignment: Qt.AlignRight
+                                text: qsTr("(Auto)")
+                            }
+                        }
                         RowLayout {
                             spacing: 10
                             Layout.alignment: Qt.AlignHCenter

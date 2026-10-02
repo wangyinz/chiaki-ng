@@ -279,6 +279,24 @@ class Settings : public QObject
 		bool GetButtonsByPosition() const 		{ return settings.value("settings/buttons_by_pos", false).toBool(); }
 		void SetButtonsByPosition(bool enabled) { settings.setValue("settings/buttons_by_pos", enabled); }
 
+		int GetTouchscreenCorner(int corner) const
+		{ return corner >= 0 && corner < 4 ? qBound(0, settings.value(QString("settings/touchscreen_corner_%1").arg(corner), 0).toInt(), 16) : 0; }
+		void SetTouchscreenCorner(int corner, int action)
+		{ if(corner >= 0 && corner < 4) settings.setValue(QString("settings/touchscreen_corner_%1").arg(corner), qBound(0, action, 16)); }
+		int GetTouchscreenCornerSize() const { return qBound(3, settings.value("settings/touchscreen_corner_size", 8).toInt(), 20); }
+		void SetTouchscreenCornerSize(int value) { settings.setValue("settings/touchscreen_corner_size", qBound(3, value, 20)); }
+		bool GetTouchscreenEdgeClick() const { return settings.value("settings/touchscreen_edge_click", true).toBool(); }
+		void SetTouchscreenEdgeClick(bool value) { settings.setValue("settings/touchscreen_edge_click", value); }
+		bool GetTouchscreenThreeFingerPs() const { return settings.value("settings/touchscreen_three_finger_ps", true).toBool(); }
+		void SetTouchscreenThreeFingerPs(bool value) { settings.setValue("settings/touchscreen_three_finger_ps", value); }
+		int GetTouchscreenDoubleTapMs() const { return qBound(200, settings.value("settings/touchscreen_double_tap_ms", 650).toInt(), 1000); }
+		void SetTouchscreenDoubleTapMs(int value) { settings.setValue("settings/touchscreen_double_tap_ms", qBound(200, value, 1000)); }
+		bool GetAllyTriggerRumbleEnabled() const { return settings.value("settings/ally_trigger_rumble_enabled", false).toBool(); }
+		void SetAllyTriggerRumbleEnabled(bool value) { settings.setValue("settings/ally_trigger_rumble_enabled", value); }
+
+		bool GetForceRogAllyInputProfile() const { return settings.value("settings/force_rog_ally_input_profile", false).toBool(); }
+		void SetForceRogAllyInputProfile(bool enabled) { settings.setValue("settings/force_rog_ally_input_profile", enabled); }
+
 		bool GetAllowJoystickBackgroundEvents() const { return settings.value("settings/allow_joystick_background_events", true).toBool(); }
 		void SetAllowJoystickBackgroundEvents(bool enabled) { settings.setValue("settings/allow_joystick_background_events", enabled); }
 

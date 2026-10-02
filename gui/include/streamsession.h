@@ -39,6 +39,8 @@
 #include <QTimer>
 #include <QQueue>
 #include <QElapsedTimer>
+#include "touchscreenrouter.h"
+#include "allyrumble.h"
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -215,13 +217,23 @@ class StreamSession : public QObject
 		bool sdeck_orient_dirty;
 		bool vertical_sdeck;
 #endif
-		QQueue<uint16_t> rumble_haptics;
+		QQueue<QPair<uint16_t, uint16_t>> rumble_haptics;
 		bool rumble_haptics_connected;
 		bool rumble_haptics_on;
+		uint64_t last_haptics_debug_ms = 0;
+		uint16_t last_haptics_debug_left = 0;
+		uint16_t last_haptics_debug_right = 0;
+		ChiakiAllyRumble::Mixer ally_rumble;
+		QTimer *rumble_haptics_timer = nullptr;
+		bool ally_rumble_running = true;
+		uint64_t ally_rumble_log_ms = 0;
 		float PS_TOUCHPAD_MAX_X, PS_TOUCHPAD_MAX_Y;
 		ChiakiControllerState keyboard_state;
 		ChiakiControllerState touch_state;
-		QMap<int, uint8_t> touch_tracker;
+		ChiakiTouch::Router touchscreen;
+		QTimer *touchscreen_timer = nullptr;
+		bool ally_trigger_rumble_enabled = false;
+		void ApplyTouchscreenStates(const std::vector<ChiakiTouch::Snapshot> &states);
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
@@ -238,7 +250,6 @@ class StreamSession : public QObject
 		int8_t dpad_touch_id;
 		QPair<uint16_t, uint16_t> dpad_touch_value;
 		QTimer *dpad_touch_timer, *dpad_touch_stop_timer;
-		QElapsedTimer double_tap_timer;
 		RumbleHapticsIntensity rumble_haptics_intensity;
 		bool start_mic_unmuted;
 		bool session_started;
@@ -325,8 +336,10 @@ class StreamSession : public QObject
 		void ConnectSdeckHaptics();
 		void StopSdeckHaptics();
 #endif
-		void QueueRumbleHaptics(uint16_t strength);
+		void QueueRumbleHaptics(uint16_t left, uint16_t right);
 		void ConnectRumbleHaptics();
+		void UpdateAllyRumble();
+		void StopAllyRumble();
 
 	public:
 		explicit StreamSession(const StreamSessionConnectInfo &connect_info, QObject *parent = nullptr);
@@ -363,6 +376,7 @@ class StreamSession : public QObject
 #endif
 		void HandleKeyboardEvent(QKeyEvent *event);
 		void HandleTouchEvent(QTouchEvent *event, qreal width, qreal height);
+		void ResetTouchscreen();
 		void HandleDpadTouchEvent(ChiakiControllerState *state, bool placeholder = false);
 		void HandleMouseReleaseEvent(QMouseEvent *event);
 		void HandleMousePressEvent(QMouseEvent *event);
@@ -374,11 +388,11 @@ class StreamSession : public QObject
 		void DrainMicRingBuffer();
 		void ReadMic(const QByteArray &micdata);
 
-		void BlockInput(bool block) { input_block = block ? 1 : 2; SendFeedbackState(); }
+		void BlockInput(bool block) { if(block) ResetTouchscreen(); input_block = block ? 1 : 2; SendFeedbackState(); }
 
 	signals:
 		void FfmpegFrameAvailable();
-		void RumbleHapticPushed(uint16_t strength);
+		void RumbleHapticPushed(uint16_t left, uint16_t right);
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 		void SdeckHapticPushed(haptic_packet_t packetl, haptic_packet_t packetr);
 #endif

@@ -36,6 +36,7 @@ class ControllerManager : public QObject
 		bool joystick_allow_background_events;
 		bool is_app_active;
 		bool moved;
+		bool force_rog_ally_input_profile;
 		uint8_t dualsense_intensity;
 
 		void ControllerClosed(Controller *controller);
@@ -56,6 +57,7 @@ class ControllerManager : public QObject
 		void SetButtonsByPos();
 		void SetAllowJoystickBackgroundEvents(bool enabled);
 		void SetIsAppActive(bool active);
+		void SetForceRogAllyInputProfile(bool enabled) { force_rog_ally_input_profile = enabled; };
 		void SetDualSenseIntensity(uint8_t intensity) { dualsense_intensity = intensity; };
 		uint8_t GetDualSenseIntensity() { return dualsense_intensity; };
 		void creatingControllerMapping(bool creating_controller_mapping);
@@ -96,6 +98,7 @@ class Controller : public QObject
 		bool enable_analog_stick_mapping;
 		bool is_dualsense;
 		bool is_handheld;
+		bool is_rog_ally;
 		bool is_steam_virtual;
 		bool is_steam_virtual_unmasked;
 		bool is_dualsense_edge;
@@ -139,6 +142,7 @@ class Controller : public QObject
 		void ChangePlayerIndex(const uint8_t player_index);
 		bool IsDualSense();
 		bool IsHandheld();
+		bool IsRogAlly();
 		bool IsSteamVirtual();
 		bool IsSteamVirtualUnmasked();
 		bool IsDualSenseEdge();
