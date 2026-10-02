@@ -17,6 +17,7 @@
 #include <atomic>
 
 #include <algorithm>
+#include <cmath>
 
 #include <cstring>
 
