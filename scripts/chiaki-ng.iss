@@ -6,9 +6,11 @@
 #define MyAppURL "https://streetpea.github.io/chiaki-ng/"
 #define MyAppExeName "chiaki.exe"
 #define MyAppPath "..\chiaki-ng-Win"
+#ifndef MyAppVersion
 #define MyAppVersion() \
   GetVersionComponents(MyAppPath + "\" + MyAppExeName, Local[0], Local[1], Local[2], Local[3]), \
   Str(Local[0]) + "." + Str(Local[1]) + "." + Str(Local[2])
+#endif
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -31,6 +33,10 @@ ArchitecturesAllowed=x64compatible
 ; the 64-bit view of the registry.
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableDirPage=no
+UsePreviousAppDir=yes
+UsePreviousPrivileges=yes
+CloseApplications=yes
+RestartApplications=no
 ChangesAssociations=yes
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
@@ -87,4 +93,3 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
-

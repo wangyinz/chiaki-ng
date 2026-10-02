@@ -40,6 +40,7 @@
 #include <QQueue>
 #include <QElapsedTimer>
 #include "touchscreenrouter.h"
+#include "allyrumble.h"
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -222,8 +223,10 @@ class StreamSession : public QObject
 		uint64_t last_haptics_debug_ms = 0;
 		uint16_t last_haptics_debug_left = 0;
 		uint16_t last_haptics_debug_right = 0;
-		uint16_t trigger_rumble_left = 0;
-		uint16_t trigger_rumble_right = 0;
+		ChiakiAllyRumble::Mixer ally_rumble;
+		QTimer *rumble_haptics_timer = nullptr;
+		bool ally_rumble_running = true;
+		uint64_t ally_rumble_log_ms = 0;
 		float PS_TOUCHPAD_MAX_X, PS_TOUCHPAD_MAX_Y;
 		ChiakiControllerState keyboard_state;
 		ChiakiControllerState touch_state;
@@ -335,6 +338,8 @@ class StreamSession : public QObject
 #endif
 		void QueueRumbleHaptics(uint16_t left, uint16_t right);
 		void ConnectRumbleHaptics();
+		void UpdateAllyRumble();
+		void StopAllyRumble();
 
 	public:
 		explicit StreamSession(const StreamSessionConnectInfo &connect_info, QObject *parent = nullptr);

@@ -935,7 +935,7 @@ void Controller::SetHapticRumble(uint16_t left, uint16_t right)
 	if(is_dualsense || is_dualsense_edge)
 		SetDualSenseRumble(left >> 8, right >> 8);
 	else
-		SDL_GameControllerRumble(controller, left, right, 5000);
+		SDL_GameControllerRumble(controller, left, right, is_rog_ally ? 100 : 5000);
 #endif
 }
 
