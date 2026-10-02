@@ -227,7 +227,9 @@ class StreamSession : public QObject
 		ChiakiControllerState touch_state;
 		QMap<int, uint8_t> touch_tracker;
 		QMap<int, QPair<quint64, QPointF>> touch_press_tracker;
-		QTimer *touchpad_click_timer;
+		quint64 last_touch_tap_ms = 0;
+		QPointF last_touch_tap_pos;
+		bool touchpad_double_tap_pressed = false;
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
