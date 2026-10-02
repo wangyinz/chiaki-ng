@@ -1004,6 +1004,20 @@ void Controller::resetMotionControls()
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	if(!controller)
 		return;
+	// Preserve the calibrated sensor basis. Only a running Ally sensor is
+	// recentered without high-gain startup; other controller paths stay intact.
+	if(is_rog_ally && orientation_tracker.sample_index > 0)
+	{
+		if(chiaki_orientation_tracker_recenter(&orientation_tracker,
+			state.gyro_x, state.gyro_y, state.gyro_z,
+			real_accel.accel_x, real_accel.accel_y, real_accel.accel_z,
+			&accel_zero, last_motion_timestamp))
+		{
+			chiaki_orientation_tracker_apply_to_controller_state(&orientation_tracker, &state);
+			emit StateChanged();
+		}
+		return;
+	}
 	chiaki_accel_new_zero_set_active(&accel_zero, real_accel.accel_x, real_accel.accel_y, real_accel.accel_z, false);
 	chiaki_orientation_tracker_init(&orientation_tracker);
 	chiaki_orientation_tracker_update(

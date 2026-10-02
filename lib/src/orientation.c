@@ -226,3 +226,22 @@ CHIAKI_EXPORT void chiaki_accel_new_zero_set_active(ChiakiAccelNewZero *accel_ze
 		accel_zero->accel_y = accel_y - 1.0f;
 	accel_zero->accel_z = accel_z;
 }
+
+/* Recentring is not a cold sensor start. The captured acceleration already
+ * defines the neutral reference, so do not replay the high-gain warmup. */
+CHIAKI_EXPORT bool chiaki_orientation_tracker_recenter(ChiakiOrientationTracker *tracker,
+        float gx, float gy, float gz, float ax, float ay, float az,
+        ChiakiAccelNewZero *accel_zero, uint32_t timestamp_us)
+{
+    if(!isfinite(gx) || !isfinite(gy) || !isfinite(gz) ||
+        !isfinite(ax) || !isfinite(ay) || !isfinite(az) ||
+        (ax == 0.0f && ay == 0.0f && az == 0.0f))
+        return false;
+    chiaki_accel_new_zero_set_active(accel_zero, ax, ay, az, false);
+    chiaki_orientation_tracker_init(tracker);
+    /* Seed time and sensor state without integrating any pre-reset interval. */
+    chiaki_orientation_tracker_update(tracker, gx, gy, gz, ax, ay, az,
+        accel_zero, false, timestamp_us);
+    tracker->sample_index = WARMUP_SAMPLES_COUNT;
+    return true;
+}

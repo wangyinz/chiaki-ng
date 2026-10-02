@@ -24,4 +24,4 @@ Do not add a fixed R2 gain or claim equal physical sensation. Preserve the mixer
 
 First leave the Ally stationary while opening/closing PS menu several times. Confirm neutral recenter without a transient wobble, then normal motion response. Next fully press L2 alone, release, and fully press R2 alone for about two seconds each, using the same in-game test. Capture the INFO records `Ally rumble input`, `Trigger effects`, `Ally motion reset result`, and `Haptic PCM envelope`.
 
-Do not publish full protocol/verbose logs. Existing Windows CI builds an overwrite installer and portable archive with source-SHA identity and adds the motion regression to its early tests. Keep this candidate separate from main pending physical confirmation.
+Do not publish full protocol/verbose logs. Existing Windows CI builds an overwrite installer and portable archive with source-SHA identity without modifying the existing build workflow; the new motion regression is run separately during this review. Keep this candidate separate from main pending physical confirmation.

@@ -1790,10 +1790,10 @@ void StreamSession::UpdateAllyRumble()
 	for(auto controller : controllers)
 	{
 		if(!controller->IsRogAlly()) continue;
+		const auto input = controller->GetState();
 		ChiakiAllyRumble::Sources sources;
 		if(connected && haptics_handheld > 0)
 		{
-			const auto input = controller->GetState();
 			sources = ally_rumble.sample(input.l2_state, input.r2_state, now,
 				rumble_haptics_intensity != RumbleHapticsIntensity::Off,
 				ally_trigger_rumble_enabled);
@@ -1801,10 +1801,14 @@ void StreamSession::UpdateAllyRumble()
 		// One writer for this device: a zero from classic/audio cannot erase
 		// another source. SDL arguments are LOW/HIGH frequency, never L2/R2.
 		controller->SetHapticRumble(sources.output.low, sources.output.high);
-		if(now - ally_rumble_log_ms >= 250 && (sources.output.low || sources.output.high))
+		// Input-only diagnostics at <=4 Hz, including zeros. These values are
+		// the actual mixed command, unlike the upstream PCM-envelope log.
+		if(now - ally_rumble_log_ms >= 250)
 		{
-			CHIAKI_LOGV(log.GetChiakiLog(),
-				"Ally rumble classic low/high=%u/%u body=%u/%u trigger L2/R2=%u/%u -> motor low/high=%u/%u",
+			CHIAKI_LOGI(log.GetChiakiLog(),
+				"Ally rumble input L2/R2=%u/%u trigger_enabled=%d connected=%d "
+				"classic low/high=%u/%u body=%u/%u trigger L2/R2=%u/%u -> motor low/high=%u/%u",
+				input.l2_state, input.r2_state, ally_trigger_rumble_enabled, connected,
 				sources.classic.low, sources.classic.high, sources.body.low, sources.body.high,
 				sources.l2, sources.r2, sources.output.low, sources.output.high);
 			ally_rumble_log_ms = now;
@@ -2326,7 +2330,7 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		if(activity_changed)
 		{
 			CHIAKI_LOGI(log.GetChiakiLog(),
-				"Rumble-haptics activity raw L=%u R=%u -> rumble L=%u R=%u",
+				"Haptic PCM envelope raw L/R=%u/%u scaled L/R=%u/%u (pre-mix, not motor output)",
 				raw_left, raw_right, left, right);
 		}
 		else if(now_ms - last_haptics_debug_ms >= 250)
@@ -2493,7 +2497,18 @@ void StreamSession::Event(ChiakiEvent *event)
 		case CHIAKI_EVENT_MOTION_RESET: {
 			QMetaObject::invokeMethod(this, [this]() {
 				for(auto controller : controllers)
+				{
 					controller->resetMotionControls();
+					if(controller->IsRogAlly())
+					{
+						const auto motion = controller->GetState();
+						CHIAKI_LOGI(log.GetChiakiLog(),
+							"Ally motion reset result gyro=%g,%g,%g accel=%g,%g,%g quat=%g,%g,%g,%g",
+							motion.gyro_x, motion.gyro_y, motion.gyro_z,
+							motion.accel_x, motion.accel_y, motion.accel_z,
+							motion.orient_w, motion.orient_x, motion.orient_y, motion.orient_z);
+					}
+				}
 			});
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 			if(sdeck)
@@ -2588,7 +2603,7 @@ void StreamSession::Event(ChiakiEvent *event)
 			uint8_t data_right[10];
 			memcpy(data_right, event->trigger_effects.right, 10);
 			uint8_t type_right = event->trigger_effects.type_right;
-			CHIAKI_LOGV(log.GetChiakiLog(),
+			CHIAKI_LOGI(log.GetChiakiLog(),
 				"Trigger effects L[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x] "
 				"R[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]",
 				type_left,
