@@ -44,6 +44,38 @@
 #define SESSION_RETRY_SECONDS 20
 #define HAPTIC_RUMBLE_MIN_STRENGTH 100
 
+static uint16_t TriggerVibrationToRumble(uint8_t type, const uint8_t *data)
+{
+	// DualSense effect 0x26 is the zone-based vibrating trigger effect.
+	// data[0..1] is the active-zone mask and data[2..5] packs 10 3-bit strengths.
+	if(type != 0x26 || !data)
+		return 0;
+
+	const uint16_t active = static_cast<uint16_t>(data[0]) |
+		(static_cast<uint16_t>(data[1]) << 8);
+	if(active == 0)
+		return 0;
+
+	const uint32_t packed = static_cast<uint32_t>(data[2]) |
+		(static_cast<uint32_t>(data[3]) << 8) |
+		(static_cast<uint32_t>(data[4]) << 16) |
+		(static_cast<uint32_t>(data[5]) << 24);
+
+	uint8_t max_strength = 0;
+	for(unsigned int i = 0; i < 10; ++i)
+	{
+		if(!(active & (1u << i)))
+			continue;
+		const uint8_t strength = static_cast<uint8_t>(((packed >> (3 * i)) & 0x7u) + 1u);
+		if(strength > max_strength)
+			max_strength = strength;
+	}
+
+	// Keep the fallback deliberately below full motor output. It is only a
+	// substitute for the trigger-local actuator that the Ally does not have.
+	return static_cast<uint16_t>(qMin<unsigned int>(static_cast<unsigned int>(max_strength) * 4096u, 32768u));
+}
+
 #define MICROPHONE_SAMPLES 480
 #ifdef Q_OS_LINUX
 #define DUALSENSE_AUDIO_DEVICE_NEEDLE "DualSense"
@@ -525,6 +557,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	last_touch_tap_ms = 0;
 	last_touch_tap_pos = QPointF();
 	touchpad_double_tap_pressed = false;
+	three_finger_ps_pressed = false;
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -995,48 +1028,82 @@ void StreamSession::HandleKeyboardEvent(QKeyEvent *event)
 
 void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal height)
 {
-	// A cancelled touch sequence may never deliver individual release events.
-	// Explicitly release every PS touch so a stale point cannot remain held.
-	if(event->type() == QEvent::TouchCancel)
-	{
-		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
-			chiaki_controller_state_stop_touch(&touch_state, it.value());
-		touch_tracker.clear();
-		touch_press_tracker.clear();
-		touchpad_double_tap_pressed = false;
-		last_touch_tap_ms = 0;
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		SendFeedbackState();
-		return;
-	}
-
-	// TouchBegin starts a new Qt touch sequence. Any remaining Chiaki touches
-	// here are stale (for example after a lost TouchEnd/TouchCancel), so recover.
-	if(event->type() == QEvent::TouchBegin && !touch_tracker.empty())
-	{
-		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
-			chiaki_controller_state_stop_touch(&touch_state, it.value());
-		touch_tracker.clear();
-		touch_press_tracker.clear();
-		touchpad_double_tap_pressed = false;
-	}
-
-	// Recompute the physical touchpad button state. A Portal-style double tap
-	// keeps the button held for the duration of the second tap; touching the
-	// outer edge preserves chiaki-ng's existing hold-to-click behavior.
-	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-	if(touchpad_double_tap_pressed)
-		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-
-	const QList<QTouchEvent::TouchPoint> touchPoints = event->points();
+	const QList<QTouchEvent::TouchPoint> touch_points = event->points();
 	QSet<int> active_physical_ids;
-	for(const QTouchEvent::TouchPoint &point : touchPoints)
+	for(const QTouchEvent::TouchPoint &point : touch_points)
 	{
 		if(point.state() != QEventPoint::State::Released)
 			active_physical_ids.insert(point.id());
 	}
 
-	// Multi-touch is never part of the Portal-style double-tap gesture.
+	auto clear_ps_touches = [this]() {
+		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
+			chiaki_controller_state_stop_touch(&touch_state, it.value());
+		touch_tracker.clear();
+		touch_press_tracker.clear();
+	};
+
+	if(event->type() == QEvent::TouchCancel)
+	{
+		clear_ps_touches();
+		touchpad_double_tap_pressed = false;
+		three_finger_ps_pressed = false;
+		last_touch_tap_ms = 0;
+		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
+		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen sequence cancelled; cleared all PS touch state");
+		SendFeedbackState();
+		return;
+	}
+
+	// Once a three-finger PS gesture starts, swallow the whole physical touch
+	// sequence until every finger is lifted. This avoids feeding a 3-finger
+	// gesture into the DualSense touchpad, which only has two touch slots.
+	if(three_finger_ps_pressed)
+	{
+		clear_ps_touches();
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		if(active_physical_ids.isEmpty())
+		{
+			three_finger_ps_pressed = false;
+			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_PS;
+			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger PS gesture released");
+		}
+		else
+		{
+			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
+		}
+		SendFeedbackState();
+		return;
+	}
+
+	if(active_physical_ids.size() >= 3)
+	{
+		clear_ps_touches();
+		touchpad_double_tap_pressed = false;
+		last_touch_tap_ms = 0;
+		three_finger_ps_pressed = true;
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
+		CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button");
+		SendFeedbackState();
+		return;
+	}
+
+	// A new physical touch sequence should never inherit old Chiaki contacts.
+	if(event->type() == QEvent::TouchBegin && !touch_tracker.empty())
+	{
+		CHIAKI_LOGW(log.GetChiakiLog(),
+			"TouchBegin arrived with %d stale PS touches; clearing them", touch_tracker.size());
+		clear_ps_touches();
+		touchpad_double_tap_pressed = false;
+	}
+
+	// Recompute touchpad-button state from this event. Preserve the existing
+	// outer-edge click behavior in addition to Portal-style double tap.
+	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+	if(touchpad_double_tap_pressed)
+		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+
 	if(active_physical_ids.size() > 1)
 	{
 		last_touch_tap_ms = 0;
@@ -1044,27 +1111,24 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 	}
 
-	for (const QTouchEvent::TouchPoint &touchPoint : touchPoints)
+	for(const QTouchEvent::TouchPoint &touch_point : touch_points)
 	{
-		const int id = touchPoint.id();
-		const float norm_x = std::clamp(0.0, touchPoint.scenePosition().x() / width, 1.0);
-		const float norm_y = std::clamp(0.0, touchPoint.scenePosition().y() / height, 1.0);
+		const int id = touch_point.id();
+		const float norm_x = std::clamp(0.0, touch_point.scenePosition().x() / width, 1.0);
+		const float norm_y = std::clamp(0.0, touch_point.scenePosition().y() / height, 1.0);
 		const bool on_edge = norm_x <= 0.05 || norm_x >= 0.95 || norm_y <= 0.05 || norm_y >= 0.95;
 
-		if(touchPoint.state() != QEventPoint::State::Released && on_edge)
+		if(touch_point.state() != QEventPoint::State::Released && on_edge)
 			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
-		switch (touchPoint.state())
+		switch(touch_point.state())
 		{
-			case QEventPoint::State::Stationary:
-				continue;
 			case QEventPoint::State::Pressed:
 			case QEventPoint::State::Updated:
+			case QEventPoint::State::Stationary:
 			{
-				// Detect the second press of a short double tap before adding the new
-				// touch. This mirrors PS Portal semantics: single tap/touch is touchpad
-				// touch input, while double tap presses the physical touchpad button.
-				if(touchPoint.state() == QEventPoint::State::Pressed && touch_tracker.empty() && !on_edge)
+				if(touch_point.state() == QEventPoint::State::Pressed &&
+					active_physical_ids.size() == 1 && touch_tracker.empty() && !on_edge)
 				{
 					const quint64 now_ms = chiaki_time_now_monotonic_ms();
 					const double dx = norm_x - last_touch_tap_pos.x();
@@ -1077,30 +1141,27 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 						touchpad_double_tap_pressed = true;
 						touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 						last_touch_tap_ms = 0;
+						CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen double tap -> touchpad button");
 					}
 				}
 
-				// Scale to PS TouchPad since that's what PS Console expects.
-				const float psx = norm_x * PS_TOUCHPAD_MAX_X;
-				const float psy = norm_y * PS_TOUCHPAD_MAX_Y;
+				const uint16_t psx = static_cast<uint16_t>(norm_x * PS_TOUCHPAD_MAX_X);
+				const uint16_t psy = static_cast<uint16_t>(norm_y * PS_TOUCHPAD_MAX_Y);
 				auto it = touch_tracker.find(id);
 				if(it == touch_tracker.end())
 				{
-					int8_t cid = chiaki_controller_state_start_touch(&touch_state, (uint16_t)psx, (uint16_t)psy);
-					// if cid < 0 => already too many multi-touches
+					const int8_t cid = chiaki_controller_state_start_touch(&touch_state, psx, psy);
 					if(cid >= 0)
 					{
-						touch_tracker[id] = (uint8_t)cid;
-						if(touchPoint.state() == QEventPoint::State::Pressed)
+						touch_tracker[id] = static_cast<uint8_t>(cid);
+						if(touch_point.state() == QEventPoint::State::Pressed)
 							touch_press_tracker[id] = qMakePair(
 								chiaki_time_now_monotonic_ms(), QPointF(norm_x, norm_y));
 					}
-					else
-						break;
 				}
 				else
 				{
-					chiaki_controller_state_set_touch_pos(&touch_state, it.value(), (uint16_t)psx, (uint16_t)psy);
+					chiaki_controller_state_set_touch_pos(&touch_state, it.value(), psx, psy);
 				}
 				break;
 			}
@@ -1125,8 +1186,6 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 
 					if(touchpad_double_tap_pressed)
 					{
-						// Release the touchpad button with the second finger-up. This also
-						// supports double-tap-and-hold naturally.
 						touchpad_double_tap_pressed = false;
 						touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 						last_touch_tap_ms = 0;
@@ -1154,13 +1213,15 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		}
 	}
 
-	// Qt guarantees points() contains every existing physical contact for the
-	// target window. Reconcile our Chiaki touch table against that authoritative
-	// list so a missed/reordered release cannot leave a ghost touch behind.
+	// points() is the authoritative list for the current Qt touch sequence.
+	// Reconcile it after every event so missing/reordered UP events cannot leave
+	// a ghost DualSense touch slot active.
 	for(auto it = touch_tracker.begin(); it != touch_tracker.end();)
 	{
 		if(!active_physical_ids.contains(it.key()))
 		{
+			CHIAKI_LOGW(log.GetChiakiLog(),
+				"Releasing stale PS touch for physical id %d", it.key());
 			chiaki_controller_state_stop_touch(&touch_state, it.value());
 			touch_press_tracker.remove(it.key());
 			it = touch_tracker.erase(it);
@@ -1170,10 +1231,14 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			++it;
 		}
 	}
-	if(active_physical_ids.isEmpty() && touchpad_double_tap_pressed)
+
+	if(active_physical_ids.isEmpty())
 	{
-		touchpad_double_tap_pressed = false;
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		if(touchpad_double_tap_pressed)
+		{
+			touchpad_double_tap_pressed = false;
+			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		}
 	}
 
 	SendFeedbackState();
@@ -1312,6 +1377,19 @@ void StreamSession::UpdateGamepads()
 			connect(controller, &Controller::StateChanged, this, &StreamSession::SendFeedbackState);
 			connect(controller, &Controller::MicButtonPush, this, &StreamSession::ToggleMute);
 			controllers[controller_id] = controller;
+			if(controller->IsRogAlly() && mouse_touch_enabled)
+			{
+				// ROG Ally touchscreen input can be accompanied by mouse events on
+				// Windows. Handling both paths creates duplicate/stale PS touch IDs.
+				if(mouse_touch_id >= 0)
+				{
+					chiaki_controller_state_stop_touch(&keyboard_state, static_cast<uint8_t>(mouse_touch_id));
+					mouse_touch_id = -1;
+				}
+				mouse_touch_enabled = false;
+				CHIAKI_LOGI(log.GetChiakiLog(),
+					"ROG Ally profile: disabled mouse-to-touchpad translation; using Qt touch events only");
+			}
 			if(controller->IsHandheld())
 			{
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
@@ -1929,11 +2007,20 @@ void StreamSession::ConnectRumbleHaptics()
 #endif
 					continue;
 
-				if(left_strength > 0 || right_strength > 0 || rumble_haptics_on)
-					controller->SetHapticRumble(left_strength, right_strength);
+				uint16_t output_left = left_strength;
+				uint16_t output_right = right_strength;
+				if(controller->IsRogAlly())
+				{
+					output_left = qMax(output_left, trigger_rumble_left);
+					output_right = qMax(output_right, trigger_rumble_right);
+				}
+				if(output_left > 0 || output_right > 0 || rumble_haptics_on)
+					controller->SetHapticRumble(output_left, output_right);
 			}
 		});
-		rumble_haptics_on = left_strength > 0 || right_strength > 0;
+		rumble_haptics_on =
+			left_strength > 0 || right_strength > 0 ||
+			trigger_rumble_left > 0 || trigger_rumble_right > 0;
 	});
 	rumble_haptics_timer->start(rumble_haptics_interval);
 	rumble_haptics_connected = true;
@@ -2677,10 +2764,19 @@ void StreamSession::Event(ChiakiEvent *event)
 				type_right,
 				data_right[0], data_right[1], data_right[2], data_right[3], data_right[4],
 				data_right[5], data_right[6], data_right[7], data_right[8], data_right[9]);
-			QMetaObject::invokeMethod(this, [this, type_left, data_left, type_right, data_right]() {
-				for(auto controller : controllers)
-					controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
-			});
+			const uint16_t fallback_left = TriggerVibrationToRumble(type_left, data_left);
+			const uint16_t fallback_right = TriggerVibrationToRumble(type_right, data_right);
+			QMetaObject::invokeMethod(this,
+				[this, type_left, data_left, type_right, data_right, fallback_left, fallback_right]() {
+					trigger_rumble_left = fallback_left;
+					trigger_rumble_right = fallback_right;
+					if(fallback_left > 0 || fallback_right > 0)
+						CHIAKI_LOGI(log.GetChiakiLog(),
+							"Adaptive-trigger rumble fallback L=%u R=%u",
+							fallback_left, fallback_right);
+					for(auto controller : controllers)
+						controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
+				});
 			break;
 		}
 		default:
