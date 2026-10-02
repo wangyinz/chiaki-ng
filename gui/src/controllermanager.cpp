@@ -647,15 +647,18 @@ inline bool Controller::HandleSensorEvent(SDL_ControllerSensorEvent event)
 			accel_x = event.data[0] / SDL_STANDARD_GRAVITY;
 			accel_y = event.data[1] / SDL_STANDARD_GRAVITY;
 			accel_z = event.data[2] / SDL_STANDARD_GRAVITY;
-			// SDL3's Ally sensor-fusion output uses the same screen-upright
-			// handheld basis seen by Steam Deck: X=pitch, Y=roll, Z=yaw.
-			// Convert that to PlayStation's X=pitch, Y=yaw, Z=roll basis.
+			// RC71L calibration: with the previous handheld transform, physical
+			// Ally yaw appeared as PS roll, Ally pitch as PS yaw, and Ally roll
+			// as PS pitch. Rotate the SDL sensor basis cyclically so the resulting
+			// PlayStation axes are pitch, yaw, roll respectively.
 			if(is_rog_ally)
 			{
+				const float old_x = accel_x;
 				const float old_y = accel_y;
 				const float old_z = accel_z;
-				accel_y = -old_z;
-				accel_z = old_y;
+				accel_x = -old_z;
+				accel_y = old_y;
+				accel_z = old_x;
 			}
 			chiaki_accel_new_zero_set_active(&this->real_accel,
 			accel_x, accel_y, accel_z, true);
@@ -669,10 +672,12 @@ inline bool Controller::HandleSensorEvent(SDL_ControllerSensorEvent event)
 			gyro_z = event.data[2];
 			if(is_rog_ally)
 			{
+				const float old_x = gyro_x;
 				const float old_y = gyro_y;
 				const float old_z = gyro_z;
-				gyro_y = -old_z;
-				gyro_z = old_y;
+				gyro_x = -old_z;
+				gyro_y = old_y;
+				gyro_z = old_x;
 			}
 			chiaki_orientation_tracker_update(
 				&orientation_tracker, gyro_x, gyro_y, gyro_z,
