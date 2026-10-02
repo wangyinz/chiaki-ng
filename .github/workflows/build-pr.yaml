@@ -131,6 +131,7 @@ jobs:
           retention-days: 7
 
   build-mac_arm64_github:
+    if: false # Personal ROG Ally fork: skip non-Windows PR CI
     name: Build macOSX arm64 version Github
     runs-on: macos-15
     permissions:
@@ -200,6 +201,7 @@ jobs:
           retention-days: 7
 
   build-appimage_x64:
+    if: false # Personal ROG Ally fork: skip non-Windows PR CI
     name: Build chiaki-ng appimage_x64
     runs-on: ubuntu-latest
     permissions:
@@ -244,6 +246,7 @@ jobs:
           retention-days: 7
 
   build-appimage_arm64:
+    if: false # Personal ROG Ally fork: skip non-Windows PR CI
     name: Build chiaki-ng appimage_arm64
     runs-on: ubuntu-24.04-arm
     permissions:
