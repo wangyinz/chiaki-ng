@@ -231,9 +231,8 @@ class StreamSession : public QObject
 		QMap<int, QPair<quint64, QPointF>> touch_press_tracker;
 		quint64 last_touch_tap_ms = 0;
 		QPointF last_touch_tap_pos;
-		bool touchpad_double_tap_pressed = false;
-		bool three_finger_gesture_blocked = false;
-		bool three_finger_ps_pending = false;
+		bool touchpad_click_pulse_active = false;
+		QTimer *touchpad_click_release_timer = nullptr;
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
