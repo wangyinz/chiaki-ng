@@ -12,6 +12,7 @@
 #include "../../lib/src/utils.h"
 
 #include <QKeyEvent>
+#include <QSet>
 #include <QMutexLocker>
 #include <QtMath>
 #include <atomic>
@@ -599,6 +600,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_session_set_event_cb(&session, EventCb, this);
 
 #if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	ControllerManager::GetInstance()->SetForceRogAllyInputProfile(
+		connect_info.settings->GetForceRogAllyInputProfile());
 	connect(ControllerManager::GetInstance(), &ControllerManager::AvailableControllersUpdated, this, &StreamSession::UpdateGamepads);
 	connect(this, &StreamSession::DualSenseIntensityChanged, ControllerManager::GetInstance(), &ControllerManager::SetDualSenseIntensity);
 	if(connect_info.buttons_by_pos)
@@ -1026,6 +1029,20 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
 	const QList<QTouchEvent::TouchPoint> touchPoints = event->points();
+	QSet<int> active_physical_ids;
+	for(const QTouchEvent::TouchPoint &point : touchPoints)
+	{
+		if(point.state() != QEventPoint::State::Released)
+			active_physical_ids.insert(point.id());
+	}
+
+	// Multi-touch is never part of the Portal-style double-tap gesture.
+	if(active_physical_ids.size() > 1)
+	{
+		last_touch_tap_ms = 0;
+		touchpad_double_tap_pressed = false;
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+	}
 
 	for (const QTouchEvent::TouchPoint &touchPoint : touchPoints)
 	{
@@ -1135,6 +1152,28 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 				break;
 			}
 		}
+	}
+
+	// Qt guarantees points() contains every existing physical contact for the
+	// target window. Reconcile our Chiaki touch table against that authoritative
+	// list so a missed/reordered release cannot leave a ghost touch behind.
+	for(auto it = touch_tracker.begin(); it != touch_tracker.end();)
+	{
+		if(!active_physical_ids.contains(it.key()))
+		{
+			chiaki_controller_state_stop_touch(&touch_state, it.value());
+			touch_press_tracker.remove(it.key());
+			it = touch_tracker.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+	if(active_physical_ids.isEmpty() && touchpad_double_tap_pressed)
+	{
+		touchpad_double_tap_pressed = false;
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 	}
 
 	SendFeedbackState();
@@ -1264,7 +1303,12 @@ void StreamSession::UpdateGamepads()
 				CHIAKI_LOGE(log.GetChiakiLog(), "Failed to open controller %d", controller_id);
 				continue;
 			}
-			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d opened: \"%s\"", controller_id, controller->GetName().toLocal8Bit().constData());
+			const QByteArray controller_name = controller->GetName().toLocal8Bit();
+			const QByteArray controller_vidpid = controller->GetVIDPIDString().toLocal8Bit();
+			CHIAKI_LOGI(log.GetChiakiLog(),
+				"Controller %d opened: \"%s\" vid:pid=%s handheld=%d rog_ally_profile=%d",
+				controller_id, controller_name.constData(), controller_vidpid.constData(),
+				controller->IsHandheld(), controller->IsRogAlly());
 			connect(controller, &Controller::StateChanged, this, &StreamSession::SendFeedbackState);
 			connect(controller, &Controller::MicButtonPush, this, &StreamSession::ToggleMute);
 			controllers[controller_id] = controller;
@@ -2360,11 +2404,20 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		const bool activity_changed =
 			((left == 0) != (last_haptics_debug_left == 0)) ||
 			((right == 0) != (last_haptics_debug_right == 0));
-		if(activity_changed || now_ms - last_haptics_debug_ms >= 100)
+		if(activity_changed)
+		{
+			CHIAKI_LOGI(log.GetChiakiLog(),
+				"Rumble-haptics activity raw L=%u R=%u -> rumble L=%u R=%u",
+				raw_left, raw_right, left, right);
+		}
+		else if(now_ms - last_haptics_debug_ms >= 250)
 		{
 			CHIAKI_LOGV(log.GetChiakiLog(),
 				"Rumble-haptics frame raw L=%u R=%u -> rumble L=%u R=%u",
 				raw_left, raw_right, left, right);
+		}
+		if(activity_changed || now_ms - last_haptics_debug_ms >= 250)
+		{
 			last_haptics_debug_ms = now_ms;
 			last_haptics_debug_left = left;
 			last_haptics_debug_right = right;
