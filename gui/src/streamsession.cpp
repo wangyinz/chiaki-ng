@@ -557,7 +557,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	last_touch_tap_ms = 0;
 	last_touch_tap_pos = QPointF();
 	touchpad_double_tap_pressed = false;
-	three_finger_ps_pressed = false;
+	three_finger_gesture_blocked = false;
+	three_finger_ps_pending = false;
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -1047,7 +1048,8 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 	{
 		clear_ps_touches();
 		touchpad_double_tap_pressed = false;
-		three_finger_ps_pressed = false;
+		three_finger_gesture_blocked = false;
+		three_finger_ps_pending = false;
 		last_touch_tap_ms = 0;
 		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
 		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen sequence cancelled; cleared all PS touch state");
@@ -1055,22 +1057,18 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		return;
 	}
 
-	// Once a three-finger PS gesture starts, swallow the whole physical touch
-	// sequence until every finger is lifted. This avoids feeding a 3-finger
-	// gesture into the DualSense touchpad, which only has two touch slots.
-	if(three_finger_ps_pressed)
+	// Once a three-finger gesture is recognized, swallow the rest of that
+	// physical touch sequence. The PS-button pulse is deliberately delayed until
+	// after an all-touches-up state has been sent, so the PS5 does not receive
+	// touch releases and PS-button-down in the same feedback transition.
+	if(three_finger_gesture_blocked)
 	{
 		clear_ps_touches();
 		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 		if(active_physical_ids.isEmpty())
 		{
-			three_finger_ps_pressed = false;
-			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_PS;
-			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger PS gesture released");
-		}
-		else
-		{
-			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
+			three_finger_gesture_blocked = false;
+			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger physical touch sequence released");
 		}
 		SendFeedbackState();
 		return;
@@ -1081,11 +1079,29 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		clear_ps_touches();
 		touchpad_double_tap_pressed = false;
 		last_touch_tap_ms = 0;
-		three_finger_ps_pressed = true;
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
-		CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button");
+		three_finger_gesture_blocked = true;
+		three_finger_ps_pending = true;
+		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
+
+		// First publish a clean touchpad state. The Remote Play feedback history
+		// then records both touch-up events before we send the PS-button pulse.
+		CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture: clearing touches before PS pulse");
 		SendFeedbackState();
+
+		QTimer::singleShot(50, this, [this]() {
+			if(!three_finger_ps_pending)
+				return;
+			three_finger_ps_pending = false;
+			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
+			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button down");
+			SendFeedbackState();
+
+			QTimer::singleShot(80, this, [this]() {
+				touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_PS;
+				CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button up");
+				SendFeedbackState();
+			});
+		});
 		return;
 	}
 
