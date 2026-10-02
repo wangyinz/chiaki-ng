@@ -222,6 +222,8 @@ class StreamSession : public QObject
 		uint64_t last_haptics_debug_ms = 0;
 		uint16_t last_haptics_debug_left = 0;
 		uint16_t last_haptics_debug_right = 0;
+		uint16_t trigger_rumble_left = 0;
+		uint16_t trigger_rumble_right = 0;
 		float PS_TOUCHPAD_MAX_X, PS_TOUCHPAD_MAX_Y;
 		ChiakiControllerState keyboard_state;
 		ChiakiControllerState touch_state;
