@@ -17,7 +17,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply preimage-checked source changes
-        run: python3 .review/apply_review.py
+        run: |
+          python3 .review/apply_review.py
+          python3 -c "from pathlib import Path; p=Path('.github/workflows/build-pr.yaml'); p.write_text(p.read_text().rstrip()+'\n')"
       - name: Compile and run deterministic touchscreen regressions
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g -Igui/include tests/ally/touchscreenrouter_test.cpp -o /tmp/ally-touch-tests
@@ -28,7 +30,8 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm .review/apply_review.py .github/workflows/ally-review-apply.yml
+          git restore .github/workflows/build-pr.yaml
+          git rm .review/apply_review.py
           git add -u
           git commit -m 'Refactor touchscreen routing and add configurable corner buttons'
           git push origin HEAD:refs/heads/review/ally-touchscreen-router
