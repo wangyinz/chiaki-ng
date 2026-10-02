@@ -30,10 +30,10 @@
 #define DPAD_TOUCH_UPDATE_INTERVAL_MS 10
 #define STEAMDECK_HAPTIC_PACKETS_PER_ANALYSIS 4 // send packets every interval * packets per analysis
 #define RUMBLE_HAPTICS_PACKETS_PER_RUMBLE 3
-#define TOUCH_TAP_MAX_DURATION_MS 250
-#define TOUCH_TAP_MAX_DISTANCE 0.03
-#define TOUCH_DOUBLE_TAP_INTERVAL_MS 500
-#define TOUCH_DOUBLE_TAP_MAX_DISTANCE 0.10
+#define TOUCH_TAP_MAX_DURATION_MS 400
+#define TOUCH_TAP_MAX_DISTANCE 0.07
+#define TOUCH_DOUBLE_TAP_INTERVAL_MS 650
+#define TOUCH_DOUBLE_TAP_MAX_DISTANCE 0.18
 #define STEAMDECK_HAPTIC_SAMPLING_RATE 3000
 // DualShock4 touchpad is 1920 x 942
 #define PS4_TOUCHPAD_MAX_X 1920.0f
@@ -557,6 +557,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	last_touch_tap_ms = 0;
 	last_touch_tap_pos = QPointF();
 	touchpad_click_pulse_active = false;
+	three_finger_gesture_blocked = false;
+	three_finger_ps_pending = false;
 	touchpad_click_release_timer = new QTimer(this);
 	touchpad_click_release_timer->setSingleShot(true);
 	connect(touchpad_click_release_timer, &QTimer::timeout, this, [this] {
@@ -1058,9 +1060,64 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 	{
 		hard_clear_touch_slots();
 		last_touch_tap_ms = 0;
-		if(!touchpad_click_pulse_active)
-			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		three_finger_gesture_blocked = false;
+		three_finger_ps_pending = false;
+		if(touchpad_click_release_timer->isActive())
+			touchpad_click_release_timer->stop();
+		touchpad_click_pulse_active = false;
+		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
 		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen sequence cancelled; hard-cleared all PS touch slots");
+		SendFeedbackState();
+		return;
+	}
+
+	// Three-finger PS gesture: once the third contact is seen, immediately
+	// release every emulated touchpad slot and swallow the rest of that physical
+	// sequence. Only after all fingers are physically up do we emit a short PS
+	// button pulse. This keeps touch-up history and PS-button history separated.
+	if(three_finger_gesture_blocked)
+	{
+		hard_clear_touch_slots();
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		if(active_physical_ids.isEmpty())
+		{
+			three_finger_gesture_blocked = false;
+			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger physical sequence released; scheduling PS pulse");
+			SendFeedbackState();
+
+			if(three_finger_ps_pending)
+			{
+				three_finger_ps_pending = false;
+				QTimer::singleShot(45, this, [this]() {
+					touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
+					CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button down");
+					SendFeedbackState();
+					QTimer::singleShot(100, this, [this]() {
+						touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_PS;
+						CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button up");
+						SendFeedbackState();
+					});
+				});
+			}
+		}
+		else
+		{
+			SendFeedbackState();
+		}
+		return;
+	}
+
+	if(active_physical_ids.size() >= 3)
+	{
+		if(touchpad_click_release_timer->isActive())
+			touchpad_click_release_timer->stop();
+		touchpad_click_pulse_active = false;
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		hard_clear_touch_slots();
+		last_touch_tap_ms = 0;
+		three_finger_gesture_blocked = true;
+		three_finger_ps_pending = true;
+		CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture detected; clearing touches");
 		SendFeedbackState();
 		return;
 	}
