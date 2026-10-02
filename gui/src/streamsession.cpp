@@ -556,9 +556,15 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	touch_press_tracker = QMap<int, QPair<quint64, QPointF>>();
 	last_touch_tap_ms = 0;
 	last_touch_tap_pos = QPointF();
-	touchpad_double_tap_pressed = false;
-	three_finger_gesture_blocked = false;
-	three_finger_ps_pending = false;
+	touchpad_click_pulse_active = false;
+	touchpad_click_release_timer = new QTimer(this);
+	touchpad_click_release_timer->setSingleShot(true);
+	connect(touchpad_click_release_timer, &QTimer::timeout, this, [this] {
+		touchpad_click_pulse_active = false;
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen touchpad-click pulse -> button up");
+		SendFeedbackState();
+	});
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -1037,105 +1043,50 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			active_physical_ids.insert(point.id());
 	}
 
-	auto clear_ps_touches = [this]() {
-		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
-			chiaki_controller_state_stop_touch(&touch_state, it.value());
+	auto hard_clear_touch_slots = [this]() {
+		for(size_t i = 0; i < CHIAKI_CONTROLLER_TOUCHES_MAX; ++i)
+		{
+			if(touch_state.touches[i].id >= 0)
+				chiaki_controller_state_stop_touch(
+					&touch_state, static_cast<uint8_t>(touch_state.touches[i].id));
+		}
 		touch_tracker.clear();
 		touch_press_tracker.clear();
 	};
 
 	if(event->type() == QEvent::TouchCancel)
 	{
-		clear_ps_touches();
-		touchpad_double_tap_pressed = false;
-		three_finger_gesture_blocked = false;
-		three_finger_ps_pending = false;
+		hard_clear_touch_slots();
 		last_touch_tap_ms = 0;
-		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
-		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen sequence cancelled; cleared all PS touch state");
+		if(!touchpad_click_pulse_active)
+			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen sequence cancelled; hard-cleared all PS touch slots");
 		SendFeedbackState();
 		return;
 	}
 
-	// Once a three-finger gesture is recognized, swallow the rest of that
-	// physical touch sequence. The PS-button pulse is deliberately delayed until
-	// after an all-touches-up state has been sent, so the PS5 does not receive
-	// touch releases and PS-button-down in the same feedback transition.
-	if(three_finger_gesture_blocked)
-	{
-		clear_ps_touches();
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		if(active_physical_ids.isEmpty())
-		{
-			three_finger_gesture_blocked = false;
-			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger physical touch sequence released");
-		}
-		SendFeedbackState();
-		return;
-	}
-
-	if(active_physical_ids.size() >= 3)
-	{
-		clear_ps_touches();
-		touchpad_double_tap_pressed = false;
-		last_touch_tap_ms = 0;
-		three_finger_gesture_blocked = true;
-		three_finger_ps_pending = true;
-		touch_state.buttons &= ~(CHIAKI_CONTROLLER_BUTTON_TOUCHPAD | CHIAKI_CONTROLLER_BUTTON_PS);
-
-		// First publish a clean touchpad state. The Remote Play feedback history
-		// then records both touch-up events before we send the PS-button pulse.
-		CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture: clearing touches before PS pulse");
-		SendFeedbackState();
-
-		QTimer::singleShot(50, this, [this]() {
-			if(!three_finger_ps_pending)
-				return;
-			three_finger_ps_pending = false;
-			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_PS;
-			CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button down");
-			SendFeedbackState();
-
-			QTimer::singleShot(80, this, [this]() {
-				touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_PS;
-				CHIAKI_LOGI(log.GetChiakiLog(), "Three-finger touchscreen gesture -> PS button up");
-				SendFeedbackState();
-			});
-		});
-		return;
-	}
-
-	// A new physical touch sequence should never inherit old Chiaki contacts.
+	// A new physical sequence must not inherit any contact from a previous one.
 	if(event->type() == QEvent::TouchBegin && !touch_tracker.empty())
 	{
 		CHIAKI_LOGW(log.GetChiakiLog(),
-			"TouchBegin arrived with %d stale PS touches; clearing them", touch_tracker.size());
-		clear_ps_touches();
-		touchpad_double_tap_pressed = false;
-	}
-
-	// Recompute touchpad-button state from this event. Preserve the existing
-	// outer-edge click behavior in addition to Portal-style double tap.
-	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-	if(touchpad_double_tap_pressed)
-		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-
-	if(active_physical_ids.size() > 1)
-	{
+			"TouchBegin arrived with %d stale PS touches; hard-clearing all touch slots",
+			touch_tracker.size());
+		hard_clear_touch_slots();
 		last_touch_tap_ms = 0;
-		touchpad_double_tap_pressed = false;
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 	}
+
+	// Multi-touch is valid touchpad input, but it cannot participate in the
+	// Portal-style double-tap click recognizer.
+	if(active_physical_ids.size() > 1)
+		last_touch_tap_ms = 0;
+
+	bool double_tap_click = false;
 
 	for(const QTouchEvent::TouchPoint &touch_point : touch_points)
 	{
 		const int id = touch_point.id();
 		const float norm_x = std::clamp(0.0, touch_point.scenePosition().x() / width, 1.0);
 		const float norm_y = std::clamp(0.0, touch_point.scenePosition().y() / height, 1.0);
-		const bool on_edge = norm_x <= 0.05 || norm_x >= 0.95 || norm_y <= 0.05 || norm_y >= 0.95;
-
-		if(touch_point.state() != QEventPoint::State::Released && on_edge)
-			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
 		switch(touch_point.state())
 		{
@@ -1143,24 +1094,6 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			case QEventPoint::State::Updated:
 			case QEventPoint::State::Stationary:
 			{
-				if(touch_point.state() == QEventPoint::State::Pressed &&
-					active_physical_ids.size() == 1 && touch_tracker.empty() && !on_edge)
-				{
-					const quint64 now_ms = chiaki_time_now_monotonic_ms();
-					const double dx = norm_x - last_touch_tap_pos.x();
-					const double dy = norm_y - last_touch_tap_pos.y();
-					const double distance = std::sqrt(dx * dx + dy * dy);
-					if(last_touch_tap_ms > 0 &&
-						now_ms - last_touch_tap_ms <= TOUCH_DOUBLE_TAP_INTERVAL_MS &&
-						distance <= TOUCH_DOUBLE_TAP_MAX_DISTANCE)
-					{
-						touchpad_double_tap_pressed = true;
-						touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-						last_touch_tap_ms = 0;
-						CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen double tap -> touchpad button");
-					}
-				}
-
 				const uint16_t psx = static_cast<uint16_t>(norm_x * PS_TOUCHPAD_MAX_X);
 				const uint16_t psy = static_cast<uint16_t>(norm_y * PS_TOUCHPAD_MAX_Y);
 				auto it = touch_tracker.find(id);
@@ -1185,6 +1118,7 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			{
 				const bool was_single_touch = touch_tracker.size() == 1;
 				auto press_it = touch_press_tracker.find(id);
+				bool is_tap = false;
 				if(was_single_touch && press_it != touch_press_tracker.end())
 				{
 					const quint64 now_ms = chiaki_time_now_monotonic_ms();
@@ -1193,25 +1127,29 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 					const double dx = norm_x - start_pos.x();
 					const double dy = norm_y - start_pos.y();
 					const double distance = std::sqrt(dx * dx + dy * dy);
-					const bool started_on_edge =
-						start_pos.x() <= 0.05 || start_pos.x() >= 0.95 ||
-						start_pos.y() <= 0.05 || start_pos.y() >= 0.95;
-					const bool is_tap = !started_on_edge &&
+					is_tap =
 						duration_ms <= TOUCH_TAP_MAX_DURATION_MS &&
 						distance <= TOUCH_TAP_MAX_DISTANCE;
 
-					if(touchpad_double_tap_pressed)
+					if(is_tap && last_touch_tap_ms > 0 &&
+						now_ms - last_touch_tap_ms <= TOUCH_DOUBLE_TAP_INTERVAL_MS)
 					{
-						touchpad_double_tap_pressed = false;
-						touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-						last_touch_tap_ms = 0;
+						const double tap_dx = norm_x - last_touch_tap_pos.x();
+						const double tap_dy = norm_y - last_touch_tap_pos.y();
+						const double tap_distance = std::sqrt(tap_dx * tap_dx + tap_dy * tap_dy);
+						if(tap_distance <= TOUCH_DOUBLE_TAP_MAX_DISTANCE)
+						{
+							double_tap_click = true;
+							last_touch_tap_ms = 0;
+						}
 					}
-					else if(is_tap)
+
+					if(is_tap && !double_tap_click)
 					{
 						last_touch_tap_ms = now_ms;
 						last_touch_tap_pos = QPointF(norm_x, norm_y);
 					}
-					else
+					else if(!is_tap)
 					{
 						last_touch_tap_ms = 0;
 					}
@@ -1229,9 +1167,8 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		}
 	}
 
-	// points() is the authoritative list for the current Qt touch sequence.
-	// Reconcile it after every event so missing/reordered UP events cannot leave
-	// a ghost DualSense touch slot active.
+	// Qt's point list is authoritative. Reconcile after every event so an
+	// out-of-order/missed release cannot leave a local ghost slot behind.
 	for(auto it = touch_tracker.begin(); it != touch_tracker.end();)
 	{
 		if(!active_physical_ids.contains(it.key()))
@@ -1248,16 +1185,32 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 		}
 	}
 
+	// Final finger-up is an invariant boundary: there must be zero PS touch
+	// slots left, even if our physical-id map was already out of sync.
 	if(active_physical_ids.isEmpty())
 	{
-		if(touchpad_double_tap_pressed)
-		{
-			touchpad_double_tap_pressed = false;
+		hard_clear_touch_slots();
+		if(!touchpad_click_pulse_active)
 			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		}
 	}
 
+	// First publish the touch-up state. Only afterwards synthesize a short,
+	// explicit touchpad-button pulse. This avoids mixing the second tap's
+	// contact release and button-down into the same Remote Play history change.
 	SendFeedbackState();
+
+	if(double_tap_click)
+	{
+		QTimer::singleShot(35, this, [this]() {
+			if(touchpad_click_release_timer->isActive())
+				touchpad_click_release_timer->stop();
+			touchpad_click_pulse_active = true;
+			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+			CHIAKI_LOGI(log.GetChiakiLog(), "Touchscreen double tap -> touchpad button down");
+			SendFeedbackState();
+			touchpad_click_release_timer->start(100);
+		});
+	}
 }
 
 void StreamSession::HandleDpadTouchEvent(ChiakiControllerState *state, bool placeholder)
