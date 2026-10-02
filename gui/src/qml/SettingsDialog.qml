@@ -2752,6 +2752,28 @@ DialogView {
                             Layout.alignment: Qt.AlignHCenter
                             Label {
                                 Layout.alignment: Qt.AlignRight
+                                text: qsTr("ROG Ally Input Profile:")
+                            }
+
+                            C.CheckBox {
+                                id: forceRogAllyProfile
+                                text: qsTr("Force Ally motion/input handling")
+                                checked: Chiaki.settings.forceRogAllyInputProfile
+                                onToggled: Chiaki.settings.forceRogAllyInputProfile = checked
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Use this if the built-in Ally controller is exposed by Windows as an Xbox 360 controller. Takes effect on the next stream.")
+                            }
+
+                            Label {
+                                Layout.alignment: Qt.AlignRight
+                                text: qsTr("(Auto)")
+                            }
+                        }
+                        RowLayout {
+                            spacing: 10
+                            Layout.alignment: Qt.AlignHCenter
+                            Label {
+                                Layout.alignment: Qt.AlignRight
                                 text: qsTr("Buttons By Position:")
                             }
 
