@@ -312,6 +312,17 @@ void QmlSettings::setButtonsByPosition(bool buttonsByPosition)
     emit buttonsByPositionChanged();
 }
 
+bool QmlSettings::forceRogAllyInputProfile() const
+{
+    return settings->GetForceRogAllyInputProfile();
+}
+
+void QmlSettings::setForceRogAllyInputProfile(bool enabled)
+{
+    settings->SetForceRogAllyInputProfile(enabled);
+    emit forceRogAllyInputProfileChanged();
+}
+
 bool QmlSettings::startMicUnmuted() const
 {
     return settings->GetStartMicUnmuted();
