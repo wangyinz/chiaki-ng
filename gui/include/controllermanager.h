@@ -96,6 +96,7 @@ class Controller : public QObject
 		bool enable_analog_stick_mapping;
 		bool is_dualsense;
 		bool is_handheld;
+		bool is_rog_ally;
 		bool is_steam_virtual;
 		bool is_steam_virtual_unmasked;
 		bool is_dualsense_edge;
