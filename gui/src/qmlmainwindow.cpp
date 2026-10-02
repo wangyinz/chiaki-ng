@@ -7558,6 +7558,8 @@ bool QmlMainWindow::event(QEvent *event)
         QGuiApplication::sendEvent(quick_window, event);
         break;
     case QEvent::MouseButtonDblClick:
+        if (static_cast<QMouseEvent*>(event)->source() != Qt::MouseEventNotSynthesized)
+            return true;
         if(!settings->GetFullscreenDoubleClickEnabled())
             break;
         if (session && !grab_input) {
@@ -7583,12 +7585,16 @@ bool QmlMainWindow::event(QEvent *event)
         }
         QGuiApplication::sendEvent(quick_window, event);
         break;
+    case QEvent::WindowDeactivate:
+        if (session) session->ResetTouchscreen();
+        break;
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
     case QEvent::TouchEnd:
     case QEvent::TouchCancel:
         if (session && !grab_input) {
             session->HandleTouchEvent(static_cast<QTouchEvent*>(event), width(), height());
+            event->accept();
             return true;
         }
         QGuiApplication::sendEvent(quick_window, event);

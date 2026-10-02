@@ -198,17 +198,21 @@ static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender
 		if(state_prev->touches[i].id != state_now->touches[i].id && state_prev->touches[i].id >= 0)
 		{
 			ChiakiFeedbackHistoryEvent event;
+			CHIAKI_LOGV(feedback_sender->log, "Touch history UP slot=%zu id=%d", i, state_prev->touches[i].id);
 			chiaki_feedback_history_event_set_touchpad(&event, false, (uint8_t)state_prev->touches[i].id,
 					state_prev->touches[i].x, state_prev->touches[i].y);
 			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);
 			feedback_sender->history_dirty = true;
 		}
-		else if(state_now->touches[i].id >= 0
+		// A slot replacement requires BOTH old-UP and new-DOWN.
+		if(state_now->touches[i].id >= 0
 				&& (state_prev->touches[i].id != state_now->touches[i].id
 					|| state_prev->touches[i].x != state_now->touches[i].x
 					|| state_prev->touches[i].y != state_now->touches[i].y))
 		{
 			ChiakiFeedbackHistoryEvent event;
+			if(state_prev->touches[i].id != state_now->touches[i].id)
+				CHIAKI_LOGV(feedback_sender->log, "Touch history DOWN slot=%zu id=%d", i, state_now->touches[i].id);
 			chiaki_feedback_history_event_set_touchpad(&event, true, (uint8_t)state_now->touches[i].id,
 					state_now->touches[i].x, state_now->touches[i].y);
 			chiaki_feedback_history_buffer_push(&feedback_sender->history_buf, &event);

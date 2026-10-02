@@ -25,6 +25,7 @@ set(SOURCE_FILES
 	include/discoverymanager.h
 	src/discoverymanager.cpp
 	include/streamsession.h
+	include/touchscreenrouter.h
 	src/streamsession.cpp
 	include/sessionlog.h
 	src/sessionlog.cpp
@@ -93,6 +94,7 @@ add_executable(chiaki WIN32
 		${SOURCE_FILES}
 )
 target_include_directories(chiaki PRIVATE include)
+target_compile_features(chiaki PRIVATE cxx_std_17)
 
 add_library(placebo-libav-impl src/libav_impl.c)
 target_link_libraries(placebo-libav-impl PkgConfig::LIBPLACEBO FFMPEG::avcodec FFMPEG::avutil FFMPEG::avformat)
