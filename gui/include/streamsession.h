@@ -230,6 +230,7 @@ class StreamSession : public QObject
 		quint64 last_touch_tap_ms = 0;
 		QPointF last_touch_tap_pos;
 		bool touchpad_double_tap_pressed = false;
+		bool three_finger_ps_pressed = false;
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
