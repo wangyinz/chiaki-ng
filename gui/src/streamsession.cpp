@@ -1807,9 +1807,12 @@ void StreamSession::UpdateAllyRumble()
 		{
 			CHIAKI_LOGI(log.GetChiakiLog(),
 				"Ally rumble input L2/R2=%u/%u trigger_enabled=%d connected=%d "
-				"classic low/high=%u/%u body=%u/%u trigger L2/R2=%u/%u -> motor low/high=%u/%u",
+				"classic low/high=%u/%u body raw/used=%u/%u/%u/%u "
+				"trigger L2/R2=%u/%u -> motor low/high=%u/%u",
 				input.l2_state, input.r2_state, ally_trigger_rumble_enabled, connected,
-				sources.classic.low, sources.classic.high, sources.body.low, sources.body.high,
+				sources.classic.low, sources.classic.high,
+				sources.body.low, sources.body.high,
+				sources.bodyUsed.low, sources.bodyUsed.high,
 				sources.l2, sources.r2, sources.output.low, sources.output.high);
 			ally_rumble_log_ms = now;
 		}

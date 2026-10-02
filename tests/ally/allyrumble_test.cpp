@@ -34,6 +34,56 @@ int main()
     m.setTriggerGain(0.5); assert(m.sample(255,0,1,true,true).l2 == 16384);
     m.setTriggerGain(0); assert(same(m.sample(255,255,1,true,true).output, {}));
     m.setTriggerGain(1);
+
+    // Captured Astro trigger-demo regression: both sides receive the same 0x26
+    // trigger envelope, while the raw body-haptics stream can be much stronger
+    // during L2 than R2. They are separate DualSense actuator paths, but on an
+    // Ally both fall back to the same rumble motors. Body may therefore not
+    // raise an active trigger fallback a second time.
+    {
+        Mixer isolated;
+        const auto sustain = effect(2); // 2 * 4096 = 8192
+        isolated.setTriggers(sustain, sustain);
+
+        isolated.setBody({16000, 15500}, 100);
+        const auto left = isolated.sample(255, 0, 100, true, true);
+        assert(same(left.body, {16000,16000}));
+        assert(same(left.bodyUsed, {8192,8192}));
+        assert(same(left.trigger, {8192,8192}));
+        assert(same(left.output, {8192,8192}));
+
+        isolated.setBody({1600, 0}, 101);
+        const auto right = isolated.sample(0, 255, 101, true, true);
+        assert(same(right.body, {1600,1600}));
+        assert(same(right.bodyUsed, {1600,1600}));
+        assert(same(right.trigger, {8192,8192}));
+        assert(same(right.output, {8192,8192}));
+
+        // No active vibration trigger: body haptics retain the old behavior.
+        const auto body_only = isolated.sample(0, 0, 101, true, true);
+        assert(same(body_only.bodyUsed, {1600,1600}));
+        assert(same(body_only.output, {1600,1600}));
+
+        // Resistance/feedback modes are not converted to trigger rumble and
+        // therefore must not gate body haptics.
+        auto resistance = sustain;
+        resistance.type = 0x25;
+        isolated.setTriggers(resistance, resistance);
+        isolated.setBody({16000, 15500}, 102);
+        const auto resistance_body = isolated.sample(255, 0, 102, true, true);
+        assert(same(resistance_body.trigger, {}));
+        assert(same(resistance_body.bodyUsed, {16000,16000}));
+        assert(same(resistance_body.output, {16000,16000}));
+
+        // Classic rumble is independent and may still dominate the shared
+        // motors even while trigger/body isolation is active.
+        isolated.setTriggers(sustain, sustain);
+        isolated.setClassic(200, 200, 103);
+        const auto classic = isolated.sample(255, 0, 103, true, true);
+        assert(same(classic.classic, {51200,51200}));
+        assert(same(classic.output, {51200,51200}));
+    }
+
     m.setBody({6000,1000},10);
     assert(same(m.sample(0,0,10,true,true).output, {6000,6000}));
     m.setBody({1000,6000},10);

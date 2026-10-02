@@ -15,7 +15,9 @@ struct Stereo { uint16_t left = 0, right = 0; };
 struct TriggerEffect { uint8_t type = 0x05; std::array<uint8_t, 10> data{}; };
 struct Sources
 {
-    Motors classic, body, trigger, output;
+    // body is the raw body-haptics fallback after stereo->motor downmix.
+    // bodyUsed is the contribution that is allowed into the final motor mix.
+    Motors classic, body, bodyUsed, trigger, output;
     uint16_t l2 = 0, r2 = 0;
 };
 inline uint16_t scale(uint32_t value, double gain)
@@ -46,6 +48,21 @@ inline uint16_t triggerLevel(const TriggerEffect &effect, uint8_t position, doub
     // to detect disabled effects; XInput cannot reproduce the requested waveform.
     return scale(strength * 4096u, std::clamp(gain, 0.0, 1.0));
 }
+inline Motors capBodyDuringTrigger(Motors body, Motors trigger)
+{
+    if(trigger.low == 0 && trigger.high == 0)
+        return body;
+
+    // PS5 exposes body haptic audio and adaptive-trigger effects as separate
+    // output paths. On a DualSense they drive different actuator systems. The
+    // Ally fallback maps both onto the same LOW/HIGH rumble pair, so allowing
+    // body audio to exceed an already-active trigger fallback double-counts
+    // part of a trigger event. Preserve the body signal for diagnostics but
+    // cap the contribution used by the shared motors to the trigger envelope.
+    return {std::min(body.low, trigger.low),
+            std::min(body.high, trigger.high)};
+}
+
 inline Motors combine(Motors classic, Motors body, Motors trigger)
 {
     // Do not add duplicate descriptions of the same impact, nor let a zero
@@ -87,7 +104,11 @@ public:
             const uint16_t level = std::max(s.l2, s.r2);
             s.trigger = {level, level};
         }
-        s.output = combine(s.classic, s.body, s.trigger);
+
+        // Only the Ally fallback needs this isolation. A real DualSense keeps
+        // body haptics and adaptive triggers on separate actuator paths.
+        s.bodyUsed = capBodyDuringTrigger(s.body, s.trigger);
+        s.output = combine(s.classic, s.bodyUsed, s.trigger);
         return s;
     }
 };
