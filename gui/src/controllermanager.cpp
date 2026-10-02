@@ -148,7 +148,8 @@ ControllerManager *ControllerManager::GetInstance()
 
 ControllerManager::ControllerManager(QObject *parent)
 	: QObject(parent), creating_controller_mapping(false),
-	joystick_allow_background_events(true), dualsense_intensity(0x00), is_app_active(true)
+	joystick_allow_background_events(true), is_app_active(true), moved(false),
+	force_rog_ally_input_profile(false), dualsense_intensity(0x00)
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	SDL_SetMainReady();
@@ -382,18 +383,40 @@ Controller::Controller(int device_id, ControllerManager *manager)
 		if(SDL_JoystickGetDeviceInstanceID(i) == device_id)
 		{
 			controller = SDL_GameControllerOpen(i);
+			bool has_accel = false;
+			bool has_gyro = false;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
-			if(SDL_GameControllerHasSensor(controller, SDL_SENSOR_ACCEL))
+			has_accel = SDL_GameControllerHasSensor(controller, SDL_SENSOR_ACCEL);
+			has_gyro = SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO);
+			if(has_accel)
 				SDL_GameControllerSetSensorEnabled(controller, SDL_SENSOR_ACCEL, SDL_TRUE);
-			if(SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO))
+			if(has_gyro)
 				SDL_GameControllerSetSensorEnabled(controller, SDL_SENSOR_GYRO, SDL_TRUE);
 #endif
 			has_led = SDL_GameControllerHasLED(controller);
 			auto controller_id = QPair<uint16_t, uint16_t>(SDL_GameControllerGetVendor(controller), SDL_GameControllerGetProduct(controller));
 			is_dualsense = chiaki_dualsense_controller_ids.contains(controller_id);
-			is_handheld = chiaki_handheld_controller_ids.contains(controller_id);
-			is_rog_ally = chiaki_rog_ally_controller_ids.contains(controller_id);
 			is_dualsense_edge = chiaki_dualsense_edge_controller_ids.contains(controller_id);
+			is_handheld = chiaki_handheld_controller_ids.contains(controller_id);
+
+			// On Windows the original Ally can be exposed by SDL as the Xbox 360
+			// controller it spoofs (045e:028e). SDL3 then attaches the system BMI
+			// accel/gyro through sensor fusion. Detect that combination instead of
+			// relying only on the ASUS VID/PID that Windows may never expose here.
+			const auto xbox360_id = QPair<uint16_t, uint16_t>(0x045e, 0x028e);
+			const bool has_motion = has_accel && has_gyro;
+			const bool automatic_ally =
+				chiaki_rog_ally_controller_ids.contains(controller_id)
+#ifdef Q_OS_WIN
+				|| (controller_id == xbox360_id && has_motion)
+#endif
+				;
+			const bool forced_ally =
+				manager->force_rog_ally_input_profile && has_motion &&
+				!is_dualsense && !is_dualsense_edge;
+			is_rog_ally = automatic_ally || forced_ally;
+			if(is_rog_ally)
+				is_handheld = true;
 			firmware_version = SDL_GameControllerGetFirmwareVersion(controller);
 			SDL_Joystick *js = SDL_GameControllerGetJoystick(controller);
 			SDL_JoystickGUID guid = SDL_JoystickGetGUID(js);
@@ -928,6 +951,16 @@ bool Controller::IsHandheld()
 	if(!controller)
 		return false;
 	return is_handheld;
+#endif
+	return false;
+}
+
+bool Controller::IsRogAlly()
+{
+#ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	if(!controller)
+		return false;
+	return is_rog_ally;
 #endif
 	return false;
 }
