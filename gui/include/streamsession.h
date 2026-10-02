@@ -39,7 +39,7 @@
 #include <QTimer>
 #include <QQueue>
 #include <QElapsedTimer>
-#include <QPointF>
+#include "touchscreenrouter.h"
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -227,14 +227,10 @@ class StreamSession : public QObject
 		float PS_TOUCHPAD_MAX_X, PS_TOUCHPAD_MAX_Y;
 		ChiakiControllerState keyboard_state;
 		ChiakiControllerState touch_state;
-		QMap<int, uint8_t> touch_tracker;
-		QMap<int, QPair<quint64, QPointF>> touch_press_tracker;
-		quint64 last_touch_tap_ms = 0;
-		QPointF last_touch_tap_pos;
-		bool touchpad_click_pulse_active = false;
-		QTimer *touchpad_click_release_timer = nullptr;
-		bool three_finger_gesture_blocked = false;
-		bool three_finger_ps_pending = false;
+		ChiakiTouch::Router touchscreen;
+		QTimer *touchscreen_timer = nullptr;
+		bool ally_trigger_rumble_enabled = false;
+		void ApplyTouchscreenStates(const std::vector<ChiakiTouch::Snapshot> &states);
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
@@ -375,6 +371,7 @@ class StreamSession : public QObject
 #endif
 		void HandleKeyboardEvent(QKeyEvent *event);
 		void HandleTouchEvent(QTouchEvent *event, qreal width, qreal height);
+		void ResetTouchscreen();
 		void HandleDpadTouchEvent(ChiakiControllerState *state, bool placeholder = false);
 		void HandleMouseReleaseEvent(QMouseEvent *event);
 		void HandleMousePressEvent(QMouseEvent *event);
@@ -386,7 +383,7 @@ class StreamSession : public QObject
 		void DrainMicRingBuffer();
 		void ReadMic(const QByteArray &micdata);
 
-		void BlockInput(bool block) { input_block = block ? 1 : 2; SendFeedbackState(); }
+		void BlockInput(bool block) { if(block) ResetTouchscreen(); input_block = block ? 1 : 2; SendFeedbackState(); }
 
 	signals:
 		void FfmpegFrameAvailable();

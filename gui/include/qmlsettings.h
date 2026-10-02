@@ -1,6 +1,7 @@
 #pragma once
 
 #include "settings.h"
+#include <QVariant>
 
 class QmlSettings : public QObject
 {
@@ -25,6 +26,12 @@ class QmlSettings : public QObject
 #endif
     Q_PROPERTY(bool buttonsByPosition READ buttonsByPosition WRITE setButtonsByPosition NOTIFY buttonsByPositionChanged)
     Q_PROPERTY(bool forceRogAllyInputProfile READ forceRogAllyInputProfile WRITE setForceRogAllyInputProfile NOTIFY forceRogAllyInputProfileChanged)
+    Q_PROPERTY(QVariantList touchscreenCorners READ touchscreenCorners NOTIFY touchscreenChanged)
+    Q_PROPERTY(int touchscreenCornerSize READ touchscreenCornerSize WRITE setTouchscreenCornerSize NOTIFY touchscreenChanged)
+    Q_PROPERTY(bool touchscreenEdgeClick READ touchscreenEdgeClick WRITE setTouchscreenEdgeClick NOTIFY touchscreenChanged)
+    Q_PROPERTY(bool touchscreenThreeFingerPs READ touchscreenThreeFingerPs WRITE setTouchscreenThreeFingerPs NOTIFY touchscreenChanged)
+    Q_PROPERTY(int touchscreenDoubleTapMs READ touchscreenDoubleTapMs WRITE setTouchscreenDoubleTapMs NOTIFY touchscreenChanged)
+    Q_PROPERTY(bool allyTriggerRumbleEnabled READ allyTriggerRumbleEnabled WRITE setAllyTriggerRumbleEnabled NOTIFY touchscreenChanged)
     Q_PROPERTY(bool startMicUnmuted READ startMicUnmuted WRITE setStartMicUnmuted NOTIFY startMicUnmutedChanged)
 #ifdef CHIAKI_GUI_ENABLE_SPEEX
     Q_PROPERTY(bool speechProcessing READ speechProcessing WRITE setSpeechProcessing NOTIFY speechProcessingChanged)
@@ -222,6 +229,19 @@ public:
 
     bool buttonsByPosition() const;
     void setButtonsByPosition(bool buttonsByPosition);
+
+    QVariantList touchscreenCorners() const;
+    Q_INVOKABLE void setTouchscreenCorner(int corner, int action);
+    int touchscreenCornerSize() const;
+    void setTouchscreenCornerSize(int value);
+    bool touchscreenEdgeClick() const;
+    void setTouchscreenEdgeClick(bool value);
+    bool touchscreenThreeFingerPs() const;
+    void setTouchscreenThreeFingerPs(bool value);
+    int touchscreenDoubleTapMs() const;
+    void setTouchscreenDoubleTapMs(int value);
+    bool allyTriggerRumbleEnabled() const;
+    void setAllyTriggerRumbleEnabled(bool value);
 
     bool forceRogAllyInputProfile() const;
     void setForceRogAllyInputProfile(bool enabled);
@@ -628,6 +648,7 @@ signals:
     void rumbleHapticsIntensityChanged();
     void buttonsByPositionChanged();
     void forceRogAllyInputProfileChanged();
+    void touchscreenChanged();
     void allowJoystickBackgroundEventsChanged();
     void startMicUnmutedChanged();
 #ifdef CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE

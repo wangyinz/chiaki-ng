@@ -383,6 +383,7 @@ Controller::Controller(int device_id, ControllerManager *manager)
 		if(SDL_JoystickGetDeviceInstanceID(i) == device_id)
 		{
 			controller = SDL_GameControllerOpen(i);
+			if(!controller) break;
 			bool has_accel = false;
 			bool has_gyro = false;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
@@ -647,10 +648,9 @@ inline bool Controller::HandleSensorEvent(SDL_ControllerSensorEvent event)
 			accel_x = event.data[0] / SDL_STANDARD_GRAVITY;
 			accel_y = event.data[1] / SDL_STANDARD_GRAVITY;
 			accel_z = event.data[2] / SDL_STANDARD_GRAVITY;
-			// RC71L calibration: with the previous handheld transform, physical
-			// Ally yaw appeared as PS roll, Ally pitch as PS yaw, and Ally roll
-			// as PS pitch. Rotate the SDL sensor basis cyclically so the resulting
-			// PlayStation axes are pitch, yaw, roll respectively.
+			// Experimental Ally transform retained from the prior test branch.
+			// Axis/sign correctness still needs physical-device validation.
+			// Apply the same proper rotation to gyro and acceleration.
 			if(is_rog_ally)
 			{
 				const float old_x = accel_x;
