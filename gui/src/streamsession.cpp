@@ -31,7 +31,8 @@
 #define RUMBLE_HAPTICS_PACKETS_PER_RUMBLE 3
 #define TOUCH_TAP_MAX_DURATION_MS 250
 #define TOUCH_TAP_MAX_DISTANCE 0.03
-#define TOUCHPAD_CLICK_DURATION_MS 60
+#define TOUCH_DOUBLE_TAP_INTERVAL_MS 500
+#define TOUCH_DOUBLE_TAP_MAX_DISTANCE 0.10
 #define STEAMDECK_HAPTIC_SAMPLING_RATE 3000
 // DualShock4 touchpad is 1920 x 942
 #define PS4_TOUCHPAD_MAX_X 1920.0f
@@ -520,12 +521,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_controller_state_set_idle(&touch_state);
 	touch_tracker = QMap<int, uint8_t>();
 	touch_press_tracker = QMap<int, QPair<quint64, QPointF>>();
-	touchpad_click_timer = new QTimer(this);
-	touchpad_click_timer->setSingleShot(true);
-	connect(touchpad_click_timer, &QTimer::timeout, this, [this]{
-		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		SendFeedbackState();
-	});
+	last_touch_tap_ms = 0;
+	last_touch_tap_pos = QPointF();
+	touchpad_double_tap_pressed = false;
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -1002,8 +1000,8 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			chiaki_controller_state_stop_touch(&touch_state, it.value());
 		touch_tracker.clear();
 		touch_press_tracker.clear();
-		if(touchpad_click_timer->isActive())
-			touchpad_click_timer->stop();
+		touchpad_double_tap_pressed = false;
+		last_touch_tap_ms = 0;
 		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 		SendFeedbackState();
 		return;
@@ -1017,14 +1015,17 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			chiaki_controller_state_stop_touch(&touch_state, it.value());
 		touch_tracker.clear();
 		touch_press_tracker.clear();
+		touchpad_double_tap_pressed = false;
 	}
 
-	// Recompute the physical touchpad button state from this event. Touching an
-	// outer edge preserves the existing hold-to-click behavior.
+	// Recompute the physical touchpad button state. A Portal-style double tap
+	// keeps the button held for the duration of the second tap; touching the
+	// outer edge preserves chiaki-ng's existing hold-to-click behavior.
 	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+	if(touchpad_double_tap_pressed)
+		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
 	const QList<QTouchEvent::TouchPoint> touchPoints = event->points();
-	bool tap_click = false;
 
 	for (const QTouchEvent::TouchPoint &touchPoint : touchPoints)
 	{
@@ -1043,6 +1044,25 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 			case QEventPoint::State::Pressed:
 			case QEventPoint::State::Updated:
 			{
+				// Detect the second press of a short double tap before adding the new
+				// touch. This mirrors PS Portal semantics: single tap/touch is touchpad
+				// touch input, while double tap presses the physical touchpad button.
+				if(touchPoint.state() == QEventPoint::State::Pressed && touch_tracker.empty() && !on_edge)
+				{
+					const quint64 now_ms = chiaki_time_now_monotonic_ms();
+					const double dx = norm_x - last_touch_tap_pos.x();
+					const double dy = norm_y - last_touch_tap_pos.y();
+					const double distance = std::sqrt(dx * dx + dy * dy);
+					if(last_touch_tap_ms > 0 &&
+						now_ms - last_touch_tap_ms <= TOUCH_DOUBLE_TAP_INTERVAL_MS &&
+						distance <= TOUCH_DOUBLE_TAP_MAX_DISTANCE)
+					{
+						touchpad_double_tap_pressed = true;
+						touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+						last_touch_tap_ms = 0;
+					}
+				}
+
 				// Scale to PS TouchPad since that's what PS Console expects.
 				const float psx = norm_x * PS_TOUCHPAD_MAX_X;
 				const float psy = norm_y * PS_TOUCHPAD_MAX_Y;
@@ -1073,7 +1093,8 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 				auto press_it = touch_press_tracker.find(id);
 				if(was_single_touch && press_it != touch_press_tracker.end())
 				{
-					const quint64 duration_ms = chiaki_time_now_monotonic_ms() - press_it.value().first;
+					const quint64 now_ms = chiaki_time_now_monotonic_ms();
+					const quint64 duration_ms = now_ms - press_it.value().first;
 					const QPointF start_pos = press_it.value().second;
 					const double dx = norm_x - start_pos.x();
 					const double dy = norm_y - start_pos.y();
@@ -1081,9 +1102,27 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 					const bool started_on_edge =
 						start_pos.x() <= 0.05 || start_pos.x() >= 0.95 ||
 						start_pos.y() <= 0.05 || start_pos.y() >= 0.95;
-					tap_click = !started_on_edge &&
+					const bool is_tap = !started_on_edge &&
 						duration_ms <= TOUCH_TAP_MAX_DURATION_MS &&
 						distance <= TOUCH_TAP_MAX_DISTANCE;
+
+					if(touchpad_double_tap_pressed)
+					{
+						// Release the touchpad button with the second finger-up. This also
+						// supports double-tap-and-hold naturally.
+						touchpad_double_tap_pressed = false;
+						touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+						last_touch_tap_ms = 0;
+					}
+					else if(is_tap)
+					{
+						last_touch_tap_ms = now_ms;
+						last_touch_tap_pos = QPointF(norm_x, norm_y);
+					}
+					else
+					{
+						last_touch_tap_ms = 0;
+					}
 				}
 
 				auto it = touch_tracker.find(id);
@@ -1096,21 +1135,6 @@ void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal heig
 				break;
 			}
 		}
-	}
-
-	// A short, nearly stationary single-finger tap should behave like pressing
-	// the DualSense touchpad button. Keep it down long enough to cross at least
-	// one feedback interval, then release it automatically.
-	if(tap_click)
-	{
-		if(touchpad_click_timer->isActive())
-		{
-			touchpad_click_timer->stop();
-			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-			SendFeedbackState();
-		}
-		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-		touchpad_click_timer->start(TOUCHPAD_CLICK_DURATION_MS);
 	}
 
 	SendFeedbackState();
