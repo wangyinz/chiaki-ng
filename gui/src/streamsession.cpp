@@ -40,38 +40,6 @@
 #define SESSION_RETRY_SECONDS 20
 #define HAPTIC_RUMBLE_MIN_STRENGTH 100
 
-static uint16_t TriggerVibrationToRumble(uint8_t type, const uint8_t *data)
-{
-	// DualSense effect 0x26 is the zone-based vibrating trigger effect.
-	// data[0..1] is the active-zone mask and data[2..5] packs 10 3-bit strengths.
-	if(type != 0x26 || !data)
-		return 0;
-
-	const uint16_t active = static_cast<uint16_t>(data[0]) |
-		(static_cast<uint16_t>(data[1]) << 8);
-	if(active == 0)
-		return 0;
-
-	const uint32_t packed = static_cast<uint32_t>(data[2]) |
-		(static_cast<uint32_t>(data[3]) << 8) |
-		(static_cast<uint32_t>(data[4]) << 16) |
-		(static_cast<uint32_t>(data[5]) << 24);
-
-	uint8_t max_strength = 0;
-	for(unsigned int i = 0; i < 10; ++i)
-	{
-		if(!(active & (1u << i)))
-			continue;
-		const uint8_t strength = static_cast<uint8_t>(((packed >> (3 * i)) & 0x7u) + 1u);
-		if(strength > max_strength)
-			max_strength = strength;
-	}
-
-	// Keep the fallback deliberately below full motor output. It is only a
-	// substitute for the trigger-local actuator that the Ally does not have.
-	return static_cast<uint16_t>(qMin<unsigned int>(static_cast<unsigned int>(max_strength) * 4096u, 32768u));
-}
-
 #define MICROPHONE_SAMPLES 480
 #ifdef Q_OS_LINUX
 #define DUALSENSE_AUDIO_DEVICE_NEEDLE "DualSense"
@@ -719,8 +687,9 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 		}
 #endif
 		rumble_haptics_intensity = connect_info.rumble_haptics_intensity;
-		ConnectRumbleHaptics();
 	}
+	// The Ally mixer also owns classic rumble when DualSense audio is disabled.
+	ConnectRumbleHaptics();
 	UpdateGamepads();
 	QTimer *packet_loss_timer = new QTimer(this);
 	packet_loss_timer->setInterval(200);
@@ -754,6 +723,7 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 StreamSession::~StreamSession()
 {
+	StopAllyRumble();
 	if(touchscreen_timer) touchscreen_timer->stop();
 	mic_active.storeRelaxed(false);
 	StopAudioOutDrainThread();
@@ -857,6 +827,8 @@ StreamSession::~StreamSession()
 
 void StreamSession::Start()
 {
+	ally_rumble_running = true;
+	if(rumble_haptics_timer) rumble_haptics_timer->start();
 	if(!connect_timer.isValid())
 		connect_timer.start();
 	ChiakiErrorCode err = chiaki_session_start(&session);
@@ -869,6 +841,7 @@ void StreamSession::Start()
 
 void StreamSession::Stop()
 {
+	StopAllyRumble();
 	ResetTouchscreen();
 	mic_active.storeRelaxed(false);
 	chiaki_session_stop(&session);
@@ -1810,58 +1783,79 @@ void StreamSession::DisconnectHaptics()
 	}
 }
 
+void StreamSession::UpdateAllyRumble()
+{
+	if(!ally_rumble_running) return;
+	const uint64_t now = chiaki_time_now_monotonic_ms();
+	for(auto controller : controllers)
+	{
+		if(!controller->IsRogAlly()) continue;
+		ChiakiAllyRumble::Sources sources;
+		if(connected && haptics_handheld > 0)
+		{
+			const auto input = controller->GetState();
+			sources = ally_rumble.sample(input.l2_state, input.r2_state, now,
+				rumble_haptics_intensity != RumbleHapticsIntensity::Off,
+				ally_trigger_rumble_enabled);
+		}
+		// One writer for this device: a zero from classic/audio cannot erase
+		// another source. SDL arguments are LOW/HIGH frequency, never L2/R2.
+		controller->SetHapticRumble(sources.output.low, sources.output.high);
+		if(now - ally_rumble_log_ms >= 250 && (sources.output.low || sources.output.high))
+		{
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Ally rumble classic low/high=%u/%u body=%u/%u trigger L2/R2=%u/%u -> motor low/high=%u/%u",
+				sources.classic.low, sources.classic.high, sources.body.low, sources.body.high,
+				sources.l2, sources.r2, sources.output.low, sources.output.high);
+			ally_rumble_log_ms = now;
+		}
+	}
+}
+
+void StreamSession::StopAllyRumble()
+{
+	ally_rumble_running = false;
+	if(rumble_haptics_timer) rumble_haptics_timer->stop();
+	ally_rumble.reset();
+	for(auto controller : controllers)
+		if(controller->IsRogAlly()) controller->SetHapticRumble(0, 0);
+}
+
 void StreamSession::ConnectRumbleHaptics()
 {
-	if(rumble_haptics_connected)
-		return;
+	if(rumble_haptics_connected) return;
 	rumble_haptics = {};
 	rumble_haptics.reserve(20);
 	connect(this, &StreamSession::RumbleHapticPushed, this, &StreamSession::QueueRumbleHaptics);
-	auto rumble_haptics_interval = RUMBLE_HAPTICS_PACKETS_PER_RUMBLE * 10;
-	auto rumble_haptics_timer = new QTimer(this);
-	connect(rumble_haptics_timer, &QTimer::timeout, this, [this]{
-		uint32_t left_sum = 0;
-		uint32_t right_sum = 0;
-		for(size_t i = 0; i < RUMBLE_HAPTICS_PACKETS_PER_RUMBLE; i++)
+	rumble_haptics_timer = new QTimer(this);
+	rumble_haptics_timer->setInterval(RUMBLE_HAPTICS_PACKETS_PER_RUMBLE * 10);
+	connect(rumble_haptics_timer, &QTimer::timeout, this, [this] {
+		uint32_t left_sum = 0, right_sum = 0;
+		for(size_t i = 0; i < RUMBLE_HAPTICS_PACKETS_PER_RUMBLE; ++i)
 		{
-			if(!rumble_haptics.isEmpty())
-			{
-				const auto strength = rumble_haptics.dequeue();
-				left_sum += strength.first;
-				right_sum += strength.second;
-			}
+			if(rumble_haptics.isEmpty()) break;
+			const auto frame = rumble_haptics.dequeue();
+			left_sum += frame.first; right_sum += frame.second;
 		}
-		const uint16_t left_strength = left_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
-		const uint16_t right_strength = right_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
-		QMetaObject::invokeMethod(this, [this, left_strength, right_strength]() {
-			for(auto controller : controllers)
-			{
+		const uint16_t left = left_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		const uint16_t right = right_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		ally_rumble.setBody({left, right}, chiaki_time_now_monotonic_ms());
+		UpdateAllyRumble();
+		// Preserve the existing non-Ally / external DualSense path.
+		for(auto controller : controllers)
+		{
+			if(controller->IsRogAlly()) continue;
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
-				if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
+			if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
 #else
-				if(haptics_handheld < 1 && controller->IsHandheld())
+			if(haptics_handheld < 1 && controller->IsHandheld())
 #endif
-					continue;
-
-				uint16_t output_left = left_strength;
-				uint16_t output_right = right_strength;
-				if(controller->IsRogAlly() && ally_trigger_rumble_enabled && ps5_trigger_intensity >= 0)
-				{
-					// Experimental approximation, not DualSense trigger resistance.
-					// Effect packets describe configuration; never vibrate an untouched trigger.
-					const auto input = controller->GetState();
-					if(input.l2_state > 25) output_left = qMax(output_left, trigger_rumble_left);
-					if(input.r2_state > 25) output_right = qMax(output_right, trigger_rumble_right);
-				}
-				if(output_left > 0 || output_right > 0 || rumble_haptics_on)
-					controller->SetHapticRumble(output_left, output_right);
-			}
-		});
-		rumble_haptics_on =
-			left_strength > 0 || right_strength > 0 ||
-			(ally_trigger_rumble_enabled && (trigger_rumble_left > 0 || trigger_rumble_right > 0));
+				continue;
+			if(left || right || rumble_haptics_on) controller->SetHapticRumble(left, right);
+		}
+		rumble_haptics_on = left || right;
 	});
-	rumble_haptics_timer->start(rumble_haptics_interval);
+	rumble_haptics_timer->start();
 	rumble_haptics_connected = true;
 }
 
@@ -2414,6 +2408,7 @@ void StreamSession::Event(ChiakiEvent *event)
 			emit ConnectedChanged();
 			break;
 		case CHIAKI_EVENT_QUIT:
+			QMetaObject::invokeMethod(this, &StreamSession::StopAllyRumble, Qt::QueuedConnection);
 			if(!connected && !holepunch_session && chiaki_quit_reason_is_error(event->quit.reason) && connect_timer.elapsed() < SESSION_RETRY_SECONDS * 1000)
 			{
 				QTimer::singleShot(SESSION_RETRY_SECONDS / 3, this, &StreamSession::Start);
@@ -2445,8 +2440,11 @@ void StreamSession::Event(ChiakiEvent *event)
 			uint8_t left_adj = left * rumble_multiplier;
 			uint8_t right_adj = right * rumble_multiplier;
 			QMetaObject::invokeMethod(this, [this, left, right, left_adj, right_adj]() {
+				ally_rumble.setClassic(left, right, chiaki_time_now_monotonic_ms());
+				UpdateAllyRumble();
 				for(auto controller : controllers)
 				{
+					if(controller->IsRogAlly()) continue;
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 					if(haptics_handheld < 1 && (controller->IsHandheld() || (sdeck && controller->IsSteamVirtualUnmasked())))
 #else
@@ -2542,6 +2540,11 @@ void StreamSession::Event(ChiakiEvent *event)
 					break;
 				}
 			}
+
+			const double ally_body_gain = rumble_multiplier;
+			QMetaObject::invokeMethod(this, [this, ally_body_gain]() {
+				ally_rumble.setBodyGain(ally_body_gain); UpdateAllyRumble();
+			});
 			uint8_t trigger_intensity = (ps5_trigger_intensity < 0) ? 0xF0 : ps5_trigger_intensity;
 			uint8_t rumble_intensity = (ps5_rumble_intensity < 0) ? 0x0F : ps5_rumble_intensity;
 			emit DualSenseIntensityChanged(trigger_intensity | rumble_intensity);
@@ -2567,14 +2570,18 @@ void StreamSession::Event(ChiakiEvent *event)
 					break;
 				}
 			}
+
+			const double ally_trigger_gain = ps5_trigger_intensity < 0 ? 0.0 :
+				(ps5_trigger_intensity == 0x90 ? 0.33 : ps5_trigger_intensity == 0x60 ? 0.5 : 1.0);
+			QMetaObject::invokeMethod(this, [this, ally_trigger_gain]() {
+				ally_rumble.setTriggerGain(ally_trigger_gain); UpdateAllyRumble();
+			});
 			uint8_t trigger_intensity = (ps5_trigger_intensity < 0) ? 0xF0 : ps5_trigger_intensity;
 			uint8_t rumble_intensity = (ps5_rumble_intensity < 0) ? 0x0F : ps5_rumble_intensity;
 			emit DualSenseIntensityChanged(trigger_intensity | rumble_intensity);
 			break;
 		}
 		case CHIAKI_EVENT_TRIGGER_EFFECTS: {
-			if(ps5_trigger_intensity < 0)
-				return;
 			uint8_t type_left = event->trigger_effects.type_left;
 			uint8_t data_left[10];
 			memcpy(data_left, event->trigger_effects.left, 10);
@@ -2590,16 +2597,15 @@ void StreamSession::Event(ChiakiEvent *event)
 				type_right,
 				data_right[0], data_right[1], data_right[2], data_right[3], data_right[4],
 				data_right[5], data_right[6], data_right[7], data_right[8], data_right[9]);
-			const uint16_t fallback_left = TriggerVibrationToRumble(type_left, data_left);
-			const uint16_t fallback_right = TriggerVibrationToRumble(type_right, data_right);
+			ChiakiAllyRumble::TriggerEffect left_effect, right_effect;
+			left_effect.type = type_left; right_effect.type = type_right;
+			std::copy_n(data_left, 10, left_effect.data.begin());
+			std::copy_n(data_right, 10, right_effect.data.begin());
 			QMetaObject::invokeMethod(this,
-				[this, type_left, data_left, type_right, data_right, fallback_left, fallback_right]() {
-					trigger_rumble_left = fallback_left;
-					trigger_rumble_right = fallback_right;
-					if(fallback_left > 0 || fallback_right > 0)
-						CHIAKI_LOGI(log.GetChiakiLog(),
-							"Adaptive-trigger rumble fallback L=%u R=%u",
-							fallback_left, fallback_right);
+				[this, type_left, data_left, type_right, data_right, left_effect, right_effect]() {
+					ally_rumble.setTriggers(left_effect, right_effect);
+					UpdateAllyRumble();
+					// Native DualSense retains its unmodified trigger-effect path.
 					for(auto controller : controllers)
 						controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
 				});
