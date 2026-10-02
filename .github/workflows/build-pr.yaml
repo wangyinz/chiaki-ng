@@ -78,13 +78,20 @@ jobs:
         run: |
           pip install protobuf
           pacman -S git make unzip zip --noconfirm
-      - name: Test touch, feedback and rumble regressions
+      - name: Test Ally input, feedback, rumble and haptics diagnostics
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Igui/include tests/ally/touchscreenrouter_test.cpp -o touch-tests.exe
           ./touch-tests.exe
           python tests/ally/test_feedback_history.py
           g++ -std=c++17 -Wall -Wextra -Werror -Igui/include tests/ally/allyrumble_test.cpp -o rumble-tests.exe
           ./rumble-tests.exe
+          g++ -std=c++17 -Wall -Wextra -Werror -Igui/include tests/ally/haptics_pcm_audit_test.cpp -o haptics-pcm-tests.exe
+          ./haptics-pcm-tests.exe
+          g++ -std=c++17 -Wall -Wextra -Werror -Igui/include tests/ally/haptics_capture_test.cpp -o haptics-capture-tests.exe
+          rm -f haptics-test.chpcm haptics-test.csv
+          CHIAKI_HAPTICS_CAPTURE=haptics-test.chpcm ./haptics-capture-tests.exe
+          python scripts/analyze-ally-haptics.py haptics-test.chpcm --csv haptics-test.csv
+          test "$(( $(wc -l < haptics-test.csv) - 1 ))" -eq 4096
       - name: Build libplacebo
         run: scripts/build-libplacebo-windows.sh
       - name: Setup ffmpeg

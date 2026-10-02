@@ -41,6 +41,7 @@
 #include <QElapsedTimer>
 #include "touchscreenrouter.h"
 #include "allyrumble.h"
+#include "haptics_pcm_audit.h"
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -224,6 +225,7 @@ class StreamSession : public QObject
 		uint16_t last_haptics_debug_left = 0;
 		uint16_t last_haptics_debug_right = 0;
 		ChiakiAllyRumble::Mixer ally_rumble;
+		ChiakiHapticsAudit::Capture haptics_capture;
 		QTimer *rumble_haptics_timer = nullptr;
 		bool ally_rumble_running = true;
 		uint64_t ally_rumble_log_ms = 0;

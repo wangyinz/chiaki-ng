@@ -45,6 +45,11 @@ CHIAKI_EXPORT void chiaki_orientation_tracker_init(ChiakiOrientationTracker *tra
 CHIAKI_EXPORT void chiaki_orientation_tracker_update(ChiakiOrientationTracker *tracker,
 		float gx, float gy, float gz, float ax, float ay, float az,
 		ChiakiAccelNewZero *accel_zero, bool accel_zero_applied, uint32_t timestamp_us);
+/** Reset to the current neutral pose without restarting cold-start warmup.
+ * Returns false without changing state when the supplied sample is invalid. */
+CHIAKI_EXPORT bool chiaki_orientation_tracker_recenter(ChiakiOrientationTracker *tracker,
+		float gx, float gy, float gz, float ax, float ay, float az,
+		ChiakiAccelNewZero *accel_zero, uint32_t timestamp_us);
 CHIAKI_EXPORT void chiaki_orientation_tracker_apply_to_controller_state(ChiakiOrientationTracker *tracker,
 		ChiakiControllerState *state);
 CHIAKI_EXPORT void chiaki_accel_new_zero_set_inactive(ChiakiAccelNewZero *accel_zero, bool real_accel);
