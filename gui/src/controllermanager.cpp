@@ -6,6 +6,8 @@
 #include <QByteArray>
 #include <QTimer>
 
+#include <utility>
+
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 #include <SDL.h>
 #endif
