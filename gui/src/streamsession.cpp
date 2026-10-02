@@ -28,6 +28,9 @@
 #define DPAD_TOUCH_UPDATE_INTERVAL_MS 10
 #define STEAMDECK_HAPTIC_PACKETS_PER_ANALYSIS 4 // send packets every interval * packets per analysis
 #define RUMBLE_HAPTICS_PACKETS_PER_RUMBLE 3
+#define TOUCH_TAP_MAX_DURATION_MS 250
+#define TOUCH_TAP_MAX_DISTANCE 0.03
+#define TOUCHPAD_CLICK_DURATION_MS 60
 #define STEAMDECK_HAPTIC_SAMPLING_RATE 3000
 // DualShock4 touchpad is 1920 x 942
 #define PS4_TOUCHPAD_MAX_X 1920.0f
@@ -514,7 +517,14 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 
 	chiaki_controller_state_set_idle(&keyboard_state);
 	chiaki_controller_state_set_idle(&touch_state);
-	touch_tracker=QMap<int, uint8_t>();
+	touch_tracker = QMap<int, uint8_t>();
+	touch_press_tracker = QMap<int, QPair<quint64, QPointF>>();
+	touchpad_click_timer = new QTimer(this);
+	touchpad_click_timer->setSingleShot(true);
+	connect(touchpad_click_timer, &QTimer::timeout, this, [this]{
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		SendFeedbackState();
+	});
 	mouse_touch_id=-1;
 	dpad_touch_id =-1;
 	chiaki_controller_state_set_idle(&dpad_touch_state);
@@ -983,66 +993,125 @@ void StreamSession::HandleKeyboardEvent(QKeyEvent *event)
 
 void StreamSession::HandleTouchEvent(QTouchEvent *event, qreal width, qreal height)
 {
-	//unset touchpad (we will set it if user touches edge of screen)
+	// A cancelled touch sequence may never deliver individual release events.
+	// Explicitly release every PS touch so a stale point cannot remain held.
+	if(event->type() == QEvent::TouchCancel)
+	{
+		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
+			chiaki_controller_state_stop_touch(&touch_state, it.value());
+		touch_tracker.clear();
+		touch_press_tracker.clear();
+		if(touchpad_click_timer->isActive())
+			touchpad_click_timer->stop();
+		touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		SendFeedbackState();
+		return;
+	}
+
+	// TouchBegin starts a new Qt touch sequence. Any remaining Chiaki touches
+	// here are stale (for example after a lost TouchEnd/TouchCancel), so recover.
+	if(event->type() == QEvent::TouchBegin && !touch_tracker.empty())
+	{
+		for(auto it = touch_tracker.cbegin(); it != touch_tracker.cend(); ++it)
+			chiaki_controller_state_stop_touch(&touch_state, it.value());
+		touch_tracker.clear();
+		touch_press_tracker.clear();
+	}
+
+	// Recompute the physical touchpad button state from this event. Touching an
+	// outer edge preserves the existing hold-to-click behavior.
 	touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
 
 	const QList<QTouchEvent::TouchPoint> touchPoints = event->points();
+	bool tap_click = false;
 
 	for (const QTouchEvent::TouchPoint &touchPoint : touchPoints)
 	{
-		int id = touchPoint.id();
+		const int id = touchPoint.id();
+		const float norm_x = std::clamp(0.0, touchPoint.scenePosition().x() / width, 1.0);
+		const float norm_y = std::clamp(0.0, touchPoint.scenePosition().y() / height, 1.0);
+		const bool on_edge = norm_x <= 0.05 || norm_x >= 0.95 || norm_y <= 0.05 || norm_y >= 0.95;
+
+		if(touchPoint.state() != QEventPoint::State::Released && on_edge)
+			touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+
 		switch (touchPoint.state())
 		{
-			//skip unchanged touchpoints
 			case QEventPoint::State::Stationary:
 				continue;
 			case QEventPoint::State::Pressed:
 			case QEventPoint::State::Updated:
 			{
-				float norm_x = std::clamp(0.0, touchPoint.scenePosition().x() / width, 1.0);
-				float norm_y = std::clamp(0.0, touchPoint.scenePosition().y() / height, 1.0);
-
-				// Touching edges of screen is a touchpad click
-				if(norm_x <= 0.05 || norm_x >= 0.95 || norm_y <= 0.05 || norm_y >= 0.95)
-					touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-				else if(touch_tracker.empty()) // Double tap is a touchpad click
-				{
-					if(double_tap_timer.isValid() && double_tap_timer.elapsed() < 500)
-						touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
-					double_tap_timer.restart();
-				}
-				// Scale to PS TouchPad since that's what PS Console expects
-				float psx = norm_x * PS_TOUCHPAD_MAX_X;
-				float psy = norm_y * PS_TOUCHPAD_MAX_Y;
+				// Scale to PS TouchPad since that's what PS Console expects.
+				const float psx = norm_x * PS_TOUCHPAD_MAX_X;
+				const float psy = norm_y * PS_TOUCHPAD_MAX_Y;
 				auto it = touch_tracker.find(id);
 				if(it == touch_tracker.end())
 				{
 					int8_t cid = chiaki_controller_state_start_touch(&touch_state, (uint16_t)psx, (uint16_t)psy);
 					// if cid < 0 => already too many multi-touches
 					if(cid >= 0)
+					{
 						touch_tracker[id] = (uint8_t)cid;
+						if(touchPoint.state() == QEventPoint::State::Pressed)
+							touch_press_tracker[id] = qMakePair(
+								chiaki_time_now_monotonic_ms(), QPointF(norm_x, norm_y));
+					}
 					else
 						break;
 				}
 				else
+				{
 					chiaki_controller_state_set_touch_pos(&touch_state, it.value(), (uint16_t)psx, (uint16_t)psy);
+				}
 				break;
 			}
 			case QEventPoint::State::Released:
 			{
-				for(auto it=touch_tracker.begin(); it!=touch_tracker.end(); it++)
+				const bool was_single_touch = touch_tracker.size() == 1;
+				auto press_it = touch_press_tracker.find(id);
+				if(was_single_touch && press_it != touch_press_tracker.end())
 				{
-					if(it.key() == id)
-					{
-						chiaki_controller_state_stop_touch(&touch_state, it.value());
-						touch_tracker.erase(it);
-						break;
-					}
+					const quint64 duration_ms = chiaki_time_now_monotonic_ms() - press_it.value().first;
+					const QPointF start_pos = press_it.value().second;
+					const double dx = norm_x - start_pos.x();
+					const double dy = norm_y - start_pos.y();
+					const double distance = std::sqrt(dx * dx + dy * dy);
+					const bool started_on_edge =
+						start_pos.x() <= 0.05 || start_pos.x() >= 0.95 ||
+						start_pos.y() <= 0.05 || start_pos.y() >= 0.95;
+					tap_click = !started_on_edge &&
+						duration_ms <= TOUCH_TAP_MAX_DURATION_MS &&
+						distance <= TOUCH_TAP_MAX_DISTANCE;
 				}
+
+				auto it = touch_tracker.find(id);
+				if(it != touch_tracker.end())
+				{
+					chiaki_controller_state_stop_touch(&touch_state, it.value());
+					touch_tracker.erase(it);
+				}
+				touch_press_tracker.remove(id);
 				break;
 			}
 		}
 	}
+
+	// A short, nearly stationary single-finger tap should behave like pressing
+	// the DualSense touchpad button. Keep it down long enough to cross at least
+	// one feedback interval, then release it automatically.
+	if(tap_click)
+	{
+		if(touchpad_click_timer->isActive())
+		{
+			touchpad_click_timer->stop();
+			touch_state.buttons &= ~CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+			SendFeedbackState();
+		}
+		touch_state.buttons |= CHIAKI_CONTROLLER_BUTTON_TOUCHPAD;
+		touchpad_click_timer->start(TOUCHPAD_CLICK_DURATION_MS);
+	}
+
 	SendFeedbackState();
 }
 
@@ -1768,15 +1837,20 @@ void StreamSession::ConnectRumbleHaptics()
 	auto rumble_haptics_interval = RUMBLE_HAPTICS_PACKETS_PER_RUMBLE * 10;
 	auto rumble_haptics_timer = new QTimer(this);
 	connect(rumble_haptics_timer, &QTimer::timeout, this, [this]{
-		bool changed = false;
-		uint32_t strength = 0;
+		uint32_t left_sum = 0;
+		uint32_t right_sum = 0;
 		for(size_t i = 0; i < RUMBLE_HAPTICS_PACKETS_PER_RUMBLE; i++)
 		{
 			if(!rumble_haptics.isEmpty())
-				strength += rumble_haptics.dequeue();
+			{
+				const auto strength = rumble_haptics.dequeue();
+				left_sum += strength.first;
+				right_sum += strength.second;
+			}
 		}
-		strength /= RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
-		QMetaObject::invokeMethod(this, [this, strength]() {
+		const uint16_t left_strength = left_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		const uint16_t right_strength = right_sum / RUMBLE_HAPTICS_PACKETS_PER_RUMBLE;
+		QMetaObject::invokeMethod(this, [this, left_strength, right_strength]() {
 			for(auto controller : controllers)
 			{
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
@@ -1786,21 +1860,21 @@ void StreamSession::ConnectRumbleHaptics()
 #endif
 					continue;
 
-				if(strength > 0 || rumble_haptics_on)
-					controller->SetHapticRumble(strength, strength);
+				if(left_strength > 0 || right_strength > 0 || rumble_haptics_on)
+					controller->SetHapticRumble(left_strength, right_strength);
 			}
 		});
-		rumble_haptics_on = strength > 0 ? true : false;
+		rumble_haptics_on = left_strength > 0 || right_strength > 0;
 	});
 	rumble_haptics_timer->start(rumble_haptics_interval);
 	rumble_haptics_connected = true;
 }
 
-void StreamSession::QueueRumbleHaptics(uint16_t strength)
+void StreamSession::QueueRumbleHaptics(uint16_t left, uint16_t right)
 {
 	if(!rumble_haptics_connected)
 		return;
-	rumble_haptics.enqueue(strength);
+	rumble_haptics.enqueue(qMakePair(left, right));
 }
 
 void StreamSession::ConnectHaptics()
@@ -2214,7 +2288,8 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		}
 		uint32_t temp_left = (suml / buf_count);
 		uint32_t temp_right = (sumr / buf_count);
-		uint16_t original_strength = (temp_left > temp_right) ? temp_left : temp_right;
+		const uint32_t raw_left = temp_left;
+		const uint32_t raw_right = temp_right;
 		uint16_t left = 0;
 		uint16_t right = 0;
 		temp_left = (temp_left > HAPTIC_RUMBLE_MIN_STRENGTH) ? temp_left : 0;
@@ -2255,7 +2330,21 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 		// Set minimum rumble value if above rumble min for controllers that shift up to 9 bits when rumbling
 		left = ((left > 0 && left < (1 << 9)) ? (1 << 9) : left);
 		right = ((right > 0 && right < (1 << 9)) ? (1 << 9) : right);
-		uint16_t strength = (left > right) ? left : right;
+
+		const uint64_t now_ms = chiaki_time_now_monotonic_ms();
+		const bool activity_changed =
+			((left == 0) != (last_haptics_debug_left == 0)) ||
+			((right == 0) != (last_haptics_debug_right == 0));
+		if(activity_changed || now_ms - last_haptics_debug_ms >= 100)
+		{
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Rumble-haptics frame raw L=%u R=%u -> rumble L=%u R=%u",
+				raw_left, raw_right, left, right);
+			last_haptics_debug_ms = now_ms;
+			last_haptics_debug_left = left;
+			last_haptics_debug_right = right;
+		}
+
 		bool send_rumble_haptics = false;
 		for(auto controller : controllers)
 		{
@@ -2268,7 +2357,7 @@ void StreamSession::PushHapticsFrame(uint8_t *buf, size_t buf_size)
 			send_rumble_haptics = true;
 		}
 		if(send_rumble_haptics)
-			emit RumbleHapticPushed(strength);
+			emit RumbleHapticPushed(left, right);
 		return;
 	}
 	if(haptics_output == 0)
@@ -2360,6 +2449,8 @@ void StreamSession::Event(ChiakiEvent *event)
 				return;
 			uint8_t left = event->rumble.left;
 			uint8_t right = event->rumble.right;
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Classic rumble event low-frequency=%u high-frequency=%u", left, right);
 			uint8_t left_adj = left * rumble_multiplier;
 			uint8_t right_adj = right * rumble_multiplier;
 			QMetaObject::invokeMethod(this, [this, left, right, left_adj, right_adj]() {
@@ -2499,6 +2590,15 @@ void StreamSession::Event(ChiakiEvent *event)
 			uint8_t data_right[10];
 			memcpy(data_right, event->trigger_effects.right, 10);
 			uint8_t type_right = event->trigger_effects.type_right;
+			CHIAKI_LOGV(log.GetChiakiLog(),
+				"Trigger effects L[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x] "
+				"R[type=%02x data=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x]",
+				type_left,
+				data_left[0], data_left[1], data_left[2], data_left[3], data_left[4],
+				data_left[5], data_left[6], data_left[7], data_left[8], data_left[9],
+				type_right,
+				data_right[0], data_right[1], data_right[2], data_right[3], data_right[4],
+				data_right[5], data_right[6], data_right[7], data_right[8], data_right[9]);
 			QMetaObject::invokeMethod(this, [this, type_left, data_left, type_right, data_right]() {
 				for(auto controller : controllers)
 					controller->SetTriggerEffects(type_left, data_left, type_right, data_right);
