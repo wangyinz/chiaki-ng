@@ -39,6 +39,7 @@
 #include <QTimer>
 #include <QQueue>
 #include <QElapsedTimer>
+#include <QPointF>
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
@@ -215,13 +216,18 @@ class StreamSession : public QObject
 		bool sdeck_orient_dirty;
 		bool vertical_sdeck;
 #endif
-		QQueue<uint16_t> rumble_haptics;
+		QQueue<QPair<uint16_t, uint16_t>> rumble_haptics;
 		bool rumble_haptics_connected;
 		bool rumble_haptics_on;
+		uint64_t last_haptics_debug_ms = 0;
+		uint16_t last_haptics_debug_left = 0;
+		uint16_t last_haptics_debug_right = 0;
 		float PS_TOUCHPAD_MAX_X, PS_TOUCHPAD_MAX_Y;
 		ChiakiControllerState keyboard_state;
 		ChiakiControllerState touch_state;
 		QMap<int, uint8_t> touch_tracker;
+		QMap<int, QPair<quint64, QPointF>> touch_press_tracker;
+		QTimer *touchpad_click_timer;
 		int8_t mouse_touch_id;
 		ChiakiControllerState dpad_touch_state;
 		uint16_t dpad_touch_increment;
@@ -238,7 +244,6 @@ class StreamSession : public QObject
 		int8_t dpad_touch_id;
 		QPair<uint16_t, uint16_t> dpad_touch_value;
 		QTimer *dpad_touch_timer, *dpad_touch_stop_timer;
-		QElapsedTimer double_tap_timer;
 		RumbleHapticsIntensity rumble_haptics_intensity;
 		bool start_mic_unmuted;
 		bool session_started;
@@ -325,7 +330,7 @@ class StreamSession : public QObject
 		void ConnectSdeckHaptics();
 		void StopSdeckHaptics();
 #endif
-		void QueueRumbleHaptics(uint16_t strength);
+		void QueueRumbleHaptics(uint16_t left, uint16_t right);
 		void ConnectRumbleHaptics();
 
 	public:
@@ -378,7 +383,7 @@ class StreamSession : public QObject
 
 	signals:
 		void FfmpegFrameAvailable();
-		void RumbleHapticPushed(uint16_t strength);
+		void RumbleHapticPushed(uint16_t left, uint16_t right);
 #if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
 		void SdeckHapticPushed(haptic_packet_t packetl, haptic_packet_t packetr);
 #endif
