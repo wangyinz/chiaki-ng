@@ -112,9 +112,15 @@ static QSet<QPair<uint16_t, uint16_t>> chiaki_dualsense_edge_controller_ids({
 static QSet<QPair<uint16_t, uint16_t>> chiaki_handheld_controller_ids({
 	// in format (vendor id, product id)
 	QPair<uint16_t, uint16_t>(0x28de, 0x1205), // Steam Deck
-	QPair<uint16_t, uint16_t>(0x0b05, 0x1abe), // Rog Ally
+	QPair<uint16_t, uint16_t>(0x0b05, 0x1abe), // ROG Ally
+	QPair<uint16_t, uint16_t>(0x0b05, 0x1b4c), // ROG Ally X
 	QPair<uint16_t, uint16_t>(0x17ef, 0x6182), // Legion Go
 	QPair<uint16_t, uint16_t>(0x0db0, 0x1901), // MSI Claw
+});
+
+static QSet<QPair<uint16_t, uint16_t>> chiaki_rog_ally_controller_ids({
+	QPair<uint16_t, uint16_t>(0x0b05, 0x1abe), // ROG Ally
+	QPair<uint16_t, uint16_t>(0x0b05, 0x1b4c), // ROG Ally X
 });
 
 static QSet<QPair<uint16_t, uint16_t>> chiaki_steam_virtual_controller_ids({
@@ -358,7 +364,7 @@ void ControllerManager::ControllerClosed(Controller *controller)
 Controller::Controller(int device_id, ControllerManager *manager)
 : QObject(manager), ref(0), last_motion_timestamp(0), micbutton_push(false), is_dualsense(false),
   is_dualsense_edge(false), has_led(false), firmware_version(0), updating_mapping_button(false), is_handheld(false),
-  is_steam_virtual(false), is_steam_virtual_unmasked(false), enable_analog_stick_mapping(false)
+  is_rog_ally(false), is_steam_virtual(false), is_steam_virtual_unmasked(false), enable_analog_stick_mapping(false)
 {
 	this->id = device_id;
 	this->manager = manager;
@@ -384,6 +390,7 @@ Controller::Controller(int device_id, ControllerManager *manager)
 			auto controller_id = QPair<uint16_t, uint16_t>(SDL_GameControllerGetVendor(controller), SDL_GameControllerGetProduct(controller));
 			is_dualsense = chiaki_dualsense_controller_ids.contains(controller_id);
 			is_handheld = chiaki_handheld_controller_ids.contains(controller_id);
+			is_rog_ally = chiaki_rog_ally_controller_ids.contains(controller_id);
 			is_dualsense_edge = chiaki_dualsense_edge_controller_ids.contains(controller_id);
 			firmware_version = SDL_GameControllerGetFirmwareVersion(controller);
 			SDL_Joystick *js = SDL_GameControllerGetJoystick(controller);
@@ -615,6 +622,12 @@ inline bool Controller::HandleSensorEvent(SDL_ControllerSensorEvent event)
 			accel_x = event.data[0] / SDL_STANDARD_GRAVITY;
 			accel_y = event.data[1] / SDL_STANDARD_GRAVITY;
 			accel_z = event.data[2] / SDL_STANDARD_GRAVITY;
+			// SDL3 exposes the Ally IMU in a coordinate basis where pitch and yaw
+			// arrive swapped relative to the PlayStation controller state expected
+			// by chiaki-ng when the handheld is used in its normal screen-upright
+			// orientation. Keep gyro and accelerometer in the same transformed basis.
+			if(is_rog_ally)
+				std::swap(accel_x, accel_y);
 			chiaki_accel_new_zero_set_active(&this->real_accel,
 			accel_x, accel_y, accel_z, true);
 			chiaki_orientation_tracker_update(
@@ -625,6 +638,8 @@ inline bool Controller::HandleSensorEvent(SDL_ControllerSensorEvent event)
 			gyro_x = event.data[0];
 			gyro_y = event.data[1];
 			gyro_z = event.data[2];
+			if(is_rog_ally)
+				std::swap(gyro_x, gyro_y);
 			chiaki_orientation_tracker_update(
 				&orientation_tracker, gyro_x, gyro_y, gyro_z,
 				state.accel_x, state.accel_y, state.accel_z, &accel_zero, true, event.timestamp * 1000);
