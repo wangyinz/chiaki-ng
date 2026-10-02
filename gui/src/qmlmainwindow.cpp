@@ -7586,6 +7586,7 @@ bool QmlMainWindow::event(QEvent *event)
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
     case QEvent::TouchEnd:
+    case QEvent::TouchCancel:
         if (session && !grab_input) {
             session->HandleTouchEvent(static_cast<QTouchEvent*>(event), width(), height());
             return true;
